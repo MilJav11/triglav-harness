@@ -22,7 +22,7 @@ limited to the ephemeral GitHub runner; no local model/gateway/CLI is installed.
 - Eight executor-protocol tests and fourteen planner-protocol tests.
 - Thirty-nine reviewed SafeQwen development/worker tests, with scripted responses.
 - Forty SafeQwen integration/ownership/recovery tests and eight selected
-  existing final-verification/checkpoint regressions: 119 cases in total.
+  existing final-verification/checkpoint regressions, plus ten milestone timeout regressions: 129 cases in total.
 - Import and capture CLI --help and SafeQwen dry-run output.
 
 The protocol tests use mocked or scripted model replies. Planner correction cases
@@ -35,6 +35,10 @@ Imported helper modules do not imply that their other test cases are executed.
 The rest of the existing suite remains outside reviewed scope; importing helper
 modules does not execute their unrelated test cases. The eight selected cases
 from test_reviewer_wave6 are listed explicitly in scripts/ci_offline.py.
+
+The timeout regressions include a disposable sleeping verifier executed through
+the real Windows supervision broker; its forced exit and drained ownership records
+are checked. No model process is involved.
 
 ## Guard boundary
 

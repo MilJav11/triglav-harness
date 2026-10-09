@@ -1502,7 +1502,7 @@ class WorkUnitScheduler:
             if unit["status"] != "UNIT_VERIFIED":
                 return False, f"Unit {uid} is not UNIT_VERIFIED (status={unit['status']})"
             for vid in unit["spec"]["verifier_ids"]:
-                # Fix 3: Subprocess timeout derived from task budget
+                # Bound conservative revalidation by verifier and remaining task budgets.
                 self.check_task_budget()
                 task_rem = self.remaining_task_budget()
                 if task_rem <= 0:
@@ -1513,8 +1513,13 @@ class WorkUnitScheduler:
                 if not defn:
                     return False, f"Unknown verifier {vid} during revalidation"
 
+                v_timeout = min(defn.get("timeout_seconds", 30.0), task_rem)
+                if v_timeout <= 0:
+                    self._persist_runtime()
+                    raise Stop("BUDGET_EXHAUSTED", "verifier_timeout", f"No remaining budget for verifier {vid}")
+
                 v_start = self.clock()
-                res = self.repo.execute(defn["argv"], timeout=task_rem)
+                res = self.repo.execute(defn["argv"], timeout=v_timeout)
                 v_elapsed = self.clock() - v_start
                 self._persist_runtime()
                 self.check_task_budget()
