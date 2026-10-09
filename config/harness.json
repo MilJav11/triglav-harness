@@ -1,0 +1,61 @@
+{
+  "base_url": "http://127.0.0.1:9292",
+  "roles": {
+    "code": "llm-code",
+    "review": "llm-review",
+    "critic": "llm-critic"
+  },
+  "model_metadata": {
+    "llm-code": {
+      "display_name": "Qwen3-Coder-30B-A3B-Instruct-Q4_K_M",
+      "runtime": "llama.cpp"
+    },
+    "llm-critic": {
+      "display_name": "Nemotron-3.5-Lightning-30B-A3B-Q4_K_M",
+      "runtime": "llama.cpp"
+    },
+    "llm-review": {
+      "display_name": "GPT-OSS-120B-Q4_K_M",
+      "runtime": "HotPin"
+    }
+  },
+  "startup_timeout_seconds": 900,
+  "shutdown_timeout_seconds": 60,
+  "request_timeout_seconds": 900,
+  "min_available_ram_gb": 6,
+  "max_actions": 32,
+  "max_retries": 2,
+  "max_file_bytes": 100000,
+  "max_output_chars": 16000,
+  "review_profile": "review-safe",
+  "review_profiles": {
+    "review-safe": {
+      "hot_experts": "C:/AI/repos/hotpin-llm/hot-files/gpt-oss-120b-q4km/hot_top4.txt",
+      "min_available_ram_gb": 44,
+      "max_working_set_gb": 32
+    },
+    "review-performance": {
+      "hot_experts": "C:/AI/repos/hotpin-llm/hot-files/gpt-oss-120b-q4km/hot_top6.txt",
+      "min_available_ram_gb": 52
+    }
+  },
+  "code_min_available_ram_gb": 16,
+  "memory_recovery_timeout_seconds": 30,
+  "min_active_available_ram_gb": 6,
+  "critic": {
+    "min_available_ram_gb": 30,
+    "request_timeout_seconds": 180,
+    "max_input_chars": 16000
+  },
+  "executor": "custom",
+  "opencode": {
+    "executable": "opencode",
+    "timeout_seconds": 600,
+    "version": "1.18.30"
+  },
+  "reviewer": {
+    "min_available_ram_gb": 44,
+    "request_timeout_seconds": 300,
+    "max_input_chars": 20000
+  }
+}

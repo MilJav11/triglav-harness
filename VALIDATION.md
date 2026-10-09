@@ -1,0 +1,99 @@
+# TRIGLAV public validation summary
+
+This is a sanitized summary for the clean public snapshot. Original internal
+reports, run directories, chat identifiers and machine-local evidence links are
+excluded. No private retained evidence was accessed during this export audit.
+
+## Historical Phase 5 offline checks
+
+The export retains the controller implementation and regression tests from the
+reviewed source snapshot. The following suites are selected only after reviewing
+their dependencies. They use mock/scripted model replies and newly created
+disposable fixtures, not live models or retained qualification fixtures.
+
+| Module | Passed cases |
+|---|---:|
+| test_executor_recovery | 5 |
+| test_executor_protocol | 8 |
+| test_executor_payloads | 9 |
+| test_planner_protocol | 14 |
+| test_command_budgets | 4 |
+| test_verified_existing | 2 |
+| test_candidate_evidence | 9 |
+| test_critic_completion | 12 |
+
+During Phase 5 on 2026-10-09, all 63 selected cases passed: zero failures, errors or skipped
+cases. CLI help/import output passed under the same guards. All 63 Python files
+parsed, all 27 test modules were retained, and all 87 local documentation links
+resolved. No executable Python AST changed from the exported source. External
+link availability was not validated. Model calls: 0; denied attempts: 0.
+The test runner denies socket connect/bind/DNS, unmocked Gateway lifecycle/requests,
+and non-Git/non-Python executables. It does not execute gateway startup, native
+model runs, inference or thermal measurements.
+
+At the time of the Phase 5 tests, the staging repository had no Git commit. Those tests
+use an in-memory shim only for environment.capture's controller HEAD probe. It
+returns the exported source identifier for 48 such probes; actual source fingerprints,
+test fixture Git operations, assertions and verification remain exercised.
+This tests controller logic, not committed-public-repository identity or live setup.
+
+The other 19 regression modules and live scripts were not executed in Phase 5.
+They include native lifecycle, optional executor and local HTTP-server cases.
+Their complete dependencies need separate review. No full-suite pass is claimed.
+
+## Publication finishing audit
+
+Phase 5.1 on 2026-10-09 validated the entire 93-file candidate: 18 Markdown
+documents, 105 local links, 63 parsed Python files, 27 retained test modules,
+two safe SVGs and two metadata-free RGBA PNGs. The new independent artwork
+was rendered offline and inspected on light and dark backgrounds. Its creation
+record remains an attestation. The owner subsequently approved the exact design,
+MIT software scope and the revised brand policy in Phase 6.
+
+All software source, tests, scripts and configuration hashes match the Phase 5
+candidate. Unit tests were not repeated for these documentation/asset-only changes;
+the 63 recorded passes above retain their original guarded scope and HEAD-shim
+limitation. No runtime or qualification claim was upgraded. Model calls: 0.
+
+## Approved public launch checks
+
+The owner approved the independent v1 logo, eligible original software under MIT,
+the revised separate brand policy and publication as an Experimental Public
+Preview on 2026-10-09. This approval does not upgrade historical qualification.
+
+Phase 6 actually executed 22 reviewed offline cases: 8 executor-protocol and
+14 planner-protocol tests, with zero failures, errors or skips. CLI help/import
+output passed. The same socket/process/unmocked-Gateway guards were used; no
+denied attempt occurred and model calls were 0. Because these checks ran before
+the initial public commit, 27 exact controller HEAD probes used the test-only
+source-identity shim. No real committed-public identity or live setup pass is
+claimed. The other 25 test modules were not executed in this launch gate.
+
+The complete 93-file inventory was checked, all 63 Python sources parsed, all
+27 test modules were retained, all 105 local links resolved, and both independent
+SVGs and metadata-free PNGs passed integrity/safety checks. Source, tests, scripts
+and configuration remain unchanged from the preceding approved snapshot.
+
+## Historical external outcomes
+
+| Case | Historical reported result | Public scope |
+|---|---|---|
+| TQ-01 | Cline ledger fixture; 18 frozen tests, reviewer/final verifier and checkpoint | Historical bounded fixture, not a current public reproduction |
+| TQ-02 | Cline deleted a required file; deterministic verification rejected it | Negative tool-safety evidence, no trusted checkpoint |
+| TQ-02R | External SafeQwen bugfix; 32 frozen tests, CRITIC_CLEAN, REVIEWER_APPROVED, final verifier and checkpoint | External launcher/worker are absent; cloning does not reproduce the chain |
+
+These statements are inherited sanitized summaries, not fresh verification of
+private evidence. Historical review approval is not semantic proof. The earlier
+QUAL-004 false-trust case remains a counterexample to broad safety claims.
+
+The reporting discrepancy remains: top-level ALL_CRITERIA_PROVEN, nested AC1–AC3
+NOT_PROVEN, and completion=null. No code repair or qualification upgrade is implied.
+
+## Limits
+
+No current model, gateway, third-party CLI, hardware, cross-host restoration,
+hostile-repository safety or long-horizon qualification was performed.
+No checkpoint or cryptographic digest is a human approval signature.
+
+[Qualification scope](docs/triglav/QUALIFICATION.md) ·
+[Safety limits](docs/triglav/SAFETY_AND_LIMITATIONS.md) · [README](README.md).

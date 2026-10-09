@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="120 40 760 830" width="760" height="830" role="img" aria-labelledby="brandtitle branddesc">
+  <title id="brandtitle">TRIGLAV — original three-headed mythic emblem</title>
+  <desc id="branddesc">Text-only-designed geometric emblem of a united three-headed deity, with one forward-facing crowned face and two outward-facing profile heads, built entirely from original SVG paths and no reference images.</desc>
+  <!-- Original geometric illustration, constructed from a text brief without tracing or consulting any existing image. -->
+  <defs>
+    <linearGradient id="shield" x1="0" x2="1" y1="0" y2="1"><stop stop-color="#182b30"/><stop offset="1" stop-color="#10191e"/></linearGradient>
+    <linearGradient id="gold" x1="0" x2="1" y1="0" y2="1"><stop stop-color="#f7d58a"/><stop offset=".48" stop-color="#c49245"/><stop offset="1" stop-color="#875728"/></linearGradient>
+    <g id="leftFace" stroke-linejoin="round" stroke-linecap="round">
+      <!-- Side hair, with an outward-facing side profile -->
+      <path d="M370 282 C345 252 296 239 250 266 C206 294 188 360 213 428 C221 463 222 494 251 524 L337 540 C385 481 394 359 370 282Z" fill="#6f8079" stroke="#d3b16e" stroke-width="9"/>
+      <path d="M336 309 C298 282 252 287 227 320 C217 334 213 355 217 368 L194 388 L218 401 L216 419 C215 449 235 467 263 476 C283 483 311 469 325 452 C340 432 360 390 356 352Z" fill="#d9bc91" stroke="#352b2a" stroke-width="9"/>
+      <path d="M217 367 L194 388 L217 401 L238 396" fill="none" stroke="#352b2a" stroke-width="7"/>
+      <path d="M278 365 Q257 353 240 369" fill="none" stroke="#352b2a" stroke-width="10"/>
+      <path d="M249 369 L259 371" stroke="#352b2a" stroke-width="8"/>
+      <path d="M216 425 Q242 432 263 424" fill="none" stroke="#76513a" stroke-width="7"/>
+      <!-- A distinct angled ceremonial diadem; not a halo or copied crown -->
+      <path d="M205 320 L198 252 L247 267 L272 207 L314 256 L350 240 L374 292 L352 311 Q279 285 205 320Z" fill="url(#gold)" stroke="#513a2d" stroke-width="10"/>
+      <path d="M229 287 L341 278" fill="none" stroke="#f5dea6" stroke-width="7"/>
+      <path d="M279 240 L281 286" stroke="#704723" stroke-width="8"/>
+      <!-- Side beard exaggerated into flat geometric planes -->
+      <path d="M226 432 Q212 491 245 551 L296 640 L336 594 Q368 551 359 469 L318 445 Q291 491 257 478Z" fill="#e1d9bd" stroke="#473d37" stroke-width="9"/>
+      <path d="M242 478 L268 548 L296 594 M284 482 L300 562 M322 469 L316 558" stroke="#8a8b7e" stroke-width="9" fill="none"/>
+      <path d="M238 433 Q258 447 279 435" stroke="#f9ead3" stroke-width="8" fill="none"/>
+    </g>
+  </defs>
+
+  <!-- Angular shield and triple unity mark: a distinct octagonal silhouette -->
+  <path d="M500 55 L792 170 L860 480 L758 763 L500 850 L242 763 L140 480 L208 170Z" fill="url(#shield)" stroke="#c59650" stroke-width="20" stroke-linejoin="bevel"/>
+  <path d="M500 87 L764 193 L824 479 L731 738 L500 815 L269 738 L176 479 L236 193Z" fill="none" stroke="#e3c17b" stroke-width="5"/>
+  <!-- Three rising arrows denote three independent roles converging -->
+  <path d="M314 184 L340 134 L367 184 M474 119 L500 77 L526 119 M633 184 L660 134 L686 184" stroke="#bd8650" stroke-width="10" stroke-linecap="round" fill="none"/>
+
+  <!-- One united mantle/body, asymmetric color halves expressing different roles -->
+  <path d="M223 700 C242 619 327 594 406 588 L500 619 L594 588 C673 594 758 619 777 700 L743 748 L500 807 L257 748Z" fill="#8d443d" stroke="#4a3030" stroke-width="12"/>
+  <path d="M500 619 L594 588 C673 594 758 619 777 700 L743 748 L500 807Z" fill="#2f615d"/>
+  <path d="M225 701 Q297 636 375 625 L500 720 L625 625 Q704 636 775 701" fill="none" stroke="#e0b769" stroke-width="13"/>
+  <path d="M365 636 L500 792 L635 636" fill="none" stroke="#9d6e3b" stroke-width="10"/>
+  <path d="M500 709 L547 753 L500 797 L453 753Z" fill="#d3a655" stroke="#423527" stroke-width="9"/>
+  <path d="M500 728 L525 753 L500 778 L475 753Z" fill="#20323a"/>
+  <path d="M263 681 L316 667 L343 705 L302 732Z M737 681 L684 667 L657 705 L698 732Z" fill="#d3a655" stroke="#423527" stroke-width="7"/>
+
+  <!-- Three literal faces: the side heads share the same shoulders and space -->
+  <use href="#leftFace"/>
+  <use href="#leftFace" transform="translate(1000 0) scale(-1 1)"/>
+
+  <!-- Central head: forward gaze and distinctive stepped diadem -->
+  <path d="M391 279 Q390 235 433 205 Q500 177 567 205 Q610 235 609 279 L623 423 Q611 504 554 563 L500 578 L446 563 Q389 504 377 423Z" fill="#5e6d69" stroke="#4a3a35" stroke-width="12"/>
+  <path d="M413 295 Q450 271 500 277 Q550 271 587 295 L594 416 Q580 477 548 507 L500 527 L452 507 Q420 477 406 416Z" fill="#eed0a2" stroke="#4c3932" stroke-width="10"/>
+  <path d="M400 325 L370 258 L422 264 L442 209 L475 245 L500 160 L525 245 L558 209 L578 264 L630 258 L600 325Z" fill="url(#gold)" stroke="#44352c" stroke-width="12" stroke-linejoin="round"/>
+  <path d="M400 320 Q500 292 600 320" fill="none" stroke="#f8e0a5" stroke-width="9"/>
+  <path d="M460 268 L500 220 L540 268 L500 293Z" fill="#29484e" stroke="#624526" stroke-width="8"/>
+  <path d="M428 374 Q455 356 478 375 M522 375 Q545 356 572 374" fill="none" stroke="#49352e" stroke-width="12"/>
+  <path d="M447 384 L466 387 M534 387 L553 384" stroke="#372b29" stroke-width="10" stroke-linecap="round"/>
+  <path d="M500 390 L482 447 Q500 462 518 447" fill="none" stroke="#9c755b" stroke-width="9" stroke-linejoin="round"/>
+  <path d="M449 468 Q500 457 551 468" fill="none" stroke="#6d4a38" stroke-width="8"/>
+  <!-- Central beard with strong unmistakable taper, no braided ornaments -->
+  <path d="M423 444 Q395 476 391 539 L418 618 L458 667 L500 743 L542 667 L582 618 L609 539 Q605 476 577 444 Q566 477 532 488 L500 477 L468 488 Q434 477 423 444Z" fill="#f1e7cd" stroke="#514741" stroke-width="11"/>
+  <path d="M446 507 Q421 571 471 648 L500 716 M554 507 Q579 571 529 648 L500 716 M500 505 L500 699" fill="none" stroke="#a4a699" stroke-width="10" stroke-linecap="round"/>
+  <path d="M423 449 Q455 485 500 465 Q545 485 577 449" fill="none" stroke="#fcf0d9" stroke-width="10"/>
+
+  <!-- Deliberately simple nameplate, with type outside the emblem -->
+  </svg>
