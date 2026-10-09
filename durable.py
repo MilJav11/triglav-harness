@@ -799,6 +799,9 @@ def bind_work_unit_executor(store, executor):
     if kind in {"Agents", "SimpleNamespace"}:
         executor = getattr(executor, "executor", None)
         kind = type(executor).__name__
+    if store.state.get("options", {}).get("config", {}).get("executor") == "safe_qwen" or kind == "SafeQwenExecutor":
+        from safe_executor_binding import bind_executor
+        return bind_executor(store, executor)
     if kind not in {"LiveWorkUnitExecutor", "ScriptedExecutor"}:
         return
     store._effective_work_unit_executor = executor
@@ -839,7 +842,7 @@ def current_fingerprint(store, executor=None):
         if recorded["kind"] == "live":
             from live_work_unit_executor import LiveWorkUnitExecutor
             effective = LiveWorkUnitExecutor({"executable": recorded["executable"]})
-        else:
+        elif recorded["kind"] != "safe_qwen":
             from work_unit_scheduler import ScriptedExecutor
             effective = ScriptedExecutor()
     if effective is not None:

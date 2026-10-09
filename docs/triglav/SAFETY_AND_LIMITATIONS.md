@@ -6,6 +6,10 @@ Claim IDs resolve in the [public evidence summary](EVIDENCE_SUMMARY.md#claim-map
 
 **SafeQwen is NOT a complete OS sandbox.** It provides a preventive controller tool boundary for the configured worker operations. Controller-owned Python verification may execute repository test code and the edited source. Host isolation and concurrent filesystem mutation remain open limitations. The entire system is not established as secure against arbitrary untrusted repositories. [S02, L05](EVIDENCE_SUMMARY.md#claim-map)
 
+This historical policy description remains relevant background. See
+[current SafeQwen permissions, ownership and recovery limits](../SAFEQWEN.md#tool-permissions-and-residual-risks)
+for the Phase 8A migration, which replaces global hooks but has no live qualification.
+
 ## Exact SafeQwen tool policy
 
 | Operation | Accepted arguments and effect |
@@ -54,7 +58,7 @@ Controller-owned scope and verifier checks precede reviews. Critic findings are 
 - Tests can execute malicious imports, subprocesses or network effects. `shell=False` and an approved Python command do not sandbox Python code. Windows verifier Job Objects help supervise process lifetime; they do not isolate filesystem or network access.
 - Exclusive controller ownership is assumed. Path/hash rechecks reduce stale edits but do not eliminate adversarial TOCTOU swaps or another process mutating files concurrently. The launcher lock does not constrain unrelated processes.
 - Atomic replacement does not promise complete ACL/alternate-stream preservation or directory-fsync durability on every filesystem. A crash can leave a generated temporary file or an unmatched audit intent. Storage failure can prevent evidence retention.
-- The external in-memory identity hooks are not a generic production plugin API. Concurrent controllers in one interpreter and bare production reload are unsupported for this integration.
+- The historical external in-memory identity hooks were not a generic plugin API. Phase 8A replaces them with direct binding; concurrency, filesystem races and intermediate recovery restrictions remain described in the current integration guide.
 - Review packets are bounded. Current candidate diff evidence is capped at 6,000 characters and 32 changed files; incomplete code evidence cannot establish new trust. Reviewers can still miss defects in complete packets.
 - The successful evidence covers small supervised fixtures. Multi-unit live planning, unattended repair campaigns, concurrent tasks, large-repository reliability, cross-host restoration and every crash/reboot window are unverified.
 - Delegated model ownership can become ambiguous. Do not infer process identity from PID alone or terminate unrelated processes. Dedicated gateway ownership matters because unloading affects models on that instance.

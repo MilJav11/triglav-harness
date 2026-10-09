@@ -151,6 +151,9 @@ class Supervisor:
         import environment
         self.require_no_ambiguous_model()
         config = self.store.state["options"]["config"]
+        if config.get("executor") == "safe_qwen":
+            from safe_executor_binding import model_starting
+            return model_starting(self, role)
         text = (environment.ROOT / "runs/swap-profile.yaml").read_text(encoding="utf-8")
         alias = config["roles"][role]
         match = re.search(r"(?m)^  " + re.escape(alias) + r':\s*\n\s+cmd: >-\s*\n\s+"([^"\n]+)"', text)

@@ -4,3 +4,8 @@ runs/
 tools/llama-swap/
 .pytest_cache/
 .venv/
+
+# Operator-owned SafeQwen deployment/configuration; never publish local runtimes.
+/runtime/
+/config/safeqwen.local.json
+/config/safeqwen-policy.local.json

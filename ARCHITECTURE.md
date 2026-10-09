@@ -8,6 +8,7 @@ Its model roles, selected executor and trusted controller checks have distinct a
 | harness.py | CLI, custom JSON executor, repository tools, Gateway transport and ordinary workflow |
 | manager.py, recovery.py, planner_protocol.py | Bounded ManagerLoop, recovery observations, planning protocol and gates |
 | work_units.py, work_unit_planner.py, work_unit_scheduler.py | WorkUnit contracts, planning, scoped scheduling and verifier dispatch |
+| terminal_run.py, safe_qwen_worker.py, tool_protocol.py, integration_shim.py, safe_executor_binding.py | Opt-in fixed-WorkUnit SafeQwen migration, closed tools and direct source/config/gateway binding; offline validated |
 | live_work_unit_executor.py | Retained Cline adapter; external CLI output is untrusted |
 | opencode_executor.py | Pinned opt-in OpenCode episodes and snapshots |
 | critic.py, critic_executor.py | Advisory critic protocol and evidence |
@@ -36,8 +37,11 @@ be treated as trusted progress. Ordinary run and durable WorkUnit routes have
 different state/report structures.
 
 The historical SafeQwen route used an external fixed launcher and worker adapter.
-Those components are absent here. The public [historical architecture overview](docs/triglav/ARCHITECTURE.md)
-describes that route explicitly; it is not a supported clone-and-run installation.
+The five components are now migrated through the explicit autonomous CLI route;
+see [current SafeQwen integration](docs/SAFEQWEN.md). Its portable configuration and
+direct identity hooks differ from the historical deployment. The
+[historical architecture overview](docs/triglav/ARCHITECTURE.md) retains that
+original route description; cloning does not reproduce its qualification.
 
 Nemotron is advisory. GPT-OSS cannot override a failed deterministic verifier.
 Tests and hashes provide bounded evidence, not an OS sandbox or semantic proof.

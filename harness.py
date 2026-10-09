@@ -1560,8 +1560,9 @@ def main(argv=None) -> int:
         target.add_argument("--max-model-invocations", action="append", metavar="ROLE=N",
                             help="Optional cap on manager-level calls per role (code/critic/review); repeatable")
     auto = sub.add_parser("autonomous-run", help="Bounded multi-round Manager loop with durable evidence")
-    auto.add_argument("--executor", choices=("custom", "opencode"),
+    auto.add_argument("--executor", choices=("custom", "opencode", "safe_qwen"),
                       help="Coding executor (default custom); pinned for this durable run")
+    auto.add_argument("--safeqwen-policy", type=Path, help="Exact-file policy JSON; required only for safe_qwen")
     auto.add_argument("--repo", type=Path, required=True)
     auto.add_argument("--task", required=True)
     auto.add_argument("--verify", action="append", required=True,

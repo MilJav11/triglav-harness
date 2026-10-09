@@ -125,6 +125,9 @@ def capture(config, repository, commands, config_path=None, root=ROOT, executor=
              "execution_flags": {"optimize": sys.flags.optimize, "utf8_mode": sys.flags.utf8_mode,
                                  "isolated": sys.flags.isolated},
              "known_model_identity": config.get("model_metadata", {})}
+    if config.get("executor") == "safe_qwen":
+        from safe_executor_binding import extend_capture
+        extend_capture(value, config, executor)
     value["sha256"] = checksum(value)
     return value
 

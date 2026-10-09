@@ -80,7 +80,7 @@ and configuration remain unchanged from the preceding approved snapshot.
 |---|---|---|
 | TQ-01 | Cline ledger fixture; 18 frozen tests, reviewer/final verifier and checkpoint | Historical bounded fixture, not a current public reproduction |
 | TQ-02 | Cline deleted a required file; deterministic verification rejected it | Negative tool-safety evidence, no trusted checkpoint |
-| TQ-02R | External SafeQwen bugfix; 32 frozen tests, CRITIC_CLEAN, REVIEWER_APPROVED, final verifier and checkpoint | External launcher/worker are absent; cloning does not reproduce the chain |
+| TQ-02R | External SafeQwen bugfix; 32 frozen tests, CRITIC_CLEAN, REVIEWER_APPROVED, final verifier and checkpoint | Phase 8A migrates reviewed sources with offline tests; historical deployment/chain is not reproduced |
 
 These statements are inherited sanitized summaries, not fresh verification of
 private evidence. Historical review approval is not semantic proof. The earlier
@@ -97,3 +97,26 @@ No checkpoint or cryptographic digest is a human approval signature.
 
 [Qualification scope](docs/triglav/QUALIFICATION.md) ·
 [Safety limits](docs/triglav/SAFETY_AND_LIMITATIONS.md) · [README](README.md).
+
+## Phase 8A SafeQwen migration
+
+Five historical component hashes matched the preserved executor identity before
+migration. Only reviewed source/development tests were adapted; no private raw
+run, identifier, report, archive or retained fixture was imported. The
+[new integration](docs/SAFEQWEN.md) and [source identities](docs/SAFEQWEN_SOURCE.md)
+distinguish migrated code from the historical external deployment.
+
+The guarded Windows runner passed 119 selected offline cases (zero failures,
+errors or skips): 10 guards, 22 existing protocols, 39 worker cases, 40 integration
+cases and 8 selected existing final-verification/checkpoint regressions. Actual
+controller HEAD, disposable Git fixtures, scripted wire responses, real
+supervision brokers, deterministic verifiers and controller checkpoint logic are
+exercised. No model, unmocked Gateway, socket or unreviewed process command ran;
+model calls 0. The full suite/native smoke scripts remain outside reviewed scope.
+
+Integration tests explicitly retain rejection of intermediate dirty recovery
+without legacy observed-state proof and reject unproven terminal cleanup. Existing
+WorkUnit-versus-legacy criterion reporting remains unchanged. Source/configuration,
+runtime, policy and actual executor identity gates fail closed. This is offline
+integration validation only, not equivalence, live requalification or public-clone
+TQ-02R qualification. Phase 8B requires separate owner-authorized live validation.

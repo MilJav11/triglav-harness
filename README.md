@@ -31,8 +31,9 @@ one supervised task; `long-run`, `resume` and `status` provide durable state.
 `autonomous-run` and `autonomous-resume` expose a bounded ManagerLoop with
 WorkUnit contracts, planning and scheduling.
 
-**Snapshot boundary:** the SafeQwen worker and launcher are **not included**.
-TQ-02R is historical external qualification evidence.
+**SafeQwen boundary:** an explicitly selected [public migration](docs/SAFEQWEN.md)
+now includes the worker, fixed-WorkUnit launcher and identity adapter, with offline
+validation only. TQ-02R remains historical external qualification evidence.
 **Cloning this repository does not reproduce TQ-02R.** Its reported 32-test result
 covers one bounded fixture, not production certification of this public snapshot.
 
@@ -109,6 +110,11 @@ checks. Candidate edits remain available for inspection; the controller does not
 commit or push them. OpenCode is selected with `autonomous-run --executor opencode`;
 its exit status cannot bypass controller verification or scope checks.
 
+The optional `autonomous-run --executor safe_qwen --safeqwen-policy ...` route uses
+an operator-authored fixed WorkUnit and preserves deterministic/controller authority.
+See [SafeQwen setup, CLI and limits](docs/SAFEQWEN.md); runtime files must be provisioned
+separately. No live requalification or equivalence to TQ-02R is claimed.
+
 ## Verification
 
 Run the reviewed offline checks from a committed Windows checkout:
@@ -118,7 +124,8 @@ python -B scripts/ci_offline.py
 ```
 
 [Offline CI](docs/CI.md) parses all Python source, runs **8 executor-protocol,
-14 planner-protocol and 10 guard tests**, and captures CLI help. Model replies are
+14 planner-protocol and 10 guard tests**, plus **39 SafeQwen worker, 40 integration
+and 8 selected final-verification/checkpoint regressions** (119 total), and captures CLI help. Model replies are
 mocked/scripted. Planner cases use disposable Git fixtures and the real Python
 supervision broker; network/process/Gateway guards constrain the reviewed checks.
 Controller identity uses actual Git HEAD, without the earlier export audit's shim.
@@ -153,7 +160,7 @@ and the [recovery protocol](CONVERGENCE.md).
 
 ## Roadmap
 
-Portable SafeQwen integration, Aider evaluation, smaller reviewers, host isolation
+SafeQwen live requalification (Phase 8B), Aider evaluation, smaller reviewers, host isolation
 and broader multi-project autonomy remain proposed work. No experimental terminal
 banner is shipped. See the [roadmap](docs/triglav/ROADMAP.md) and
 [public documentation](docs/triglav/README.md) for scope and evidence.
