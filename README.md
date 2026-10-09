@@ -44,16 +44,13 @@ Failed gates lead to bounded retry or stop. Durable paths record checkpoints
 for recovery; a checkpoint does not replace human semantic review.
 
 ```mermaid
-flowchart TD
-    Task["Trusted task + Git repository"] --> Controller["Python controller<br/>harness.py / manager.py"]
-    Controller --> Executor["Code executor<br/>custom; opt-in OpenCode"]
-    Executor --> Verify["Deterministic verifier<br/>supervision.py / winprocess.py"]
-    Verify --> Review["Review policy<br/>code role or GPT-OSS"]
-    Verify --> Critic["Optional Nemotron critic<br/>advisory findings"]
-    Critic --> Review
-    Review --> Final["Final verification + evidence gates"]
-    Final --> Candidate["Candidate edits<br/>durable paths: checkpoint + resume"]
-    Candidate --> Human["Human semantic review + promotion"]
+flowchart LR
+    E["Code executor"] --> V["Initial<br/>verification"]
+    V -->|"review not required"| F["Final verification<br/>+ freshness gates"]
+    V -.-> R["Review policy<br/>optional advisory Critic<br/>code / optional GPT-OSS"]
+    R -.-> F
+    F --> A["Controller acceptance<br/>durable: checkpoint<br/>+ validated recovery"]
+    A --> H["Human<br/>semantic review"]
 ```
 
 | Component | Responsibility |
