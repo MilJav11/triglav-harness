@@ -428,7 +428,8 @@ class IntegrationTests(unittest.TestCase):
         from supervision import Supervisor
         worker, cfg = self.prepared()
         sup = Supervisor(self.store)
-        parent = {"executable": os.path.normcase(str(self.resource / "gateway.bin")), "created": "fixture-parent"}
+        # Match winprocess.identity: canonicalize Windows short/temp path aliases.
+        parent = {"executable": os.path.normcase(str((self.resource / "gateway.bin").resolve())), "created": "fixture-parent"}
         sup.inspect = Mock(return_value=parent)
         child_id = sup.model_starting("code")
         child = sup.child(child_id)
