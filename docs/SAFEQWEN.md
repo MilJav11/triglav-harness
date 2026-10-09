@@ -174,9 +174,10 @@ Run only the reviewed guarded command on a committed native Windows checkout:
 python -B scripts/ci_offline.py
 ```
 
-The current selection is 119 tests: 10 guard, 22 existing protocol, 39 worker,
-40 integration and 8 selected existing final-verification/checkpoint regressions.
-Expected terminal summary: `PASS: 119 reviewed offline cases; CLI help; ...;
+The current selection is 129 tests: 10 guard, 22 existing protocol, 39 worker,
+40 integration and 8 selected existing final-verification/checkpoint regressions, plus 10
+milestone verifier timeout regressions.
+Expected terminal summary: `PASS: 129 reviewed offline cases; CLI help; ...;
 model calls 0`. Responses are scripted; the real controller, deterministic fixture
 verifiers and checkpoint code execute. Unmocked Gateway calls, sockets and
 unreviewed process/verifier commands are denied. Imports are checked for no model,

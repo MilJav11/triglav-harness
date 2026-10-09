@@ -15,7 +15,7 @@ import unittest
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
-MODULES = {"test_ci_offline": 10, "test_executor_protocol": 8, "test_planner_protocol": 14, "test_safe_qwen_worker": 39, "test_safe_qwen_integration": 40,
+MODULES = {"test_milestone_timeout": 10, "test_ci_offline": 10, "test_executor_protocol": 8, "test_planner_protocol": 14, "test_safe_qwen_worker": 39, "test_safe_qwen_integration": 40,
            **{f"test_reviewer_wave6.TestReviewerWave6.{name}": 1 for name in (
                "test_42_final_verification_runs_after_approve",
                "test_43_old_verifier_pass_cannot_substitute_final_verification",
