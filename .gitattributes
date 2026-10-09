@@ -1,0 +1,6 @@
+# Stable byte identities for migrated SafeQwen sources on Windows and CI.
+safe_qwen_worker.py text eol=lf
+tool_protocol.py text eol=lf
+integration_shim.py text eol=lf
+terminal_run.py text eol=lf
+safe_executor_binding.py text eol=lf

@@ -2062,7 +2062,7 @@ def plan_and_execute_work_units(store, planner, *, agents=None, gateway=None, cl
 def prepare_resume(store, *, revalidate_environment=False, budgets=None, reviewer=None, executor=None):
     """Validate, record the interruption and choose the recovery action. Runs no model or verifier."""
     recorded = store.state.get("options", {}).get("work_unit_executor", {})
-    if (executor is None and recorded.get("kind") == "live"
+    if (executor is None and recorded.get("kind") in {"live", "safe_qwen"}
             and getattr(store, "_effective_work_unit_executor", None) is None):
         raise DurableError("Live WorkUnit resume requires the actual effective executor before environment gating")
     if executor is not None:
@@ -2196,6 +2196,11 @@ def dry_run_summary(commands, criteria, budgets, scope, critic, reviewer, review
 def cli(args, root, config=None):
     import shlex
     runs = root / "runs"
+    if args.command == "autonomous-run" and config.get("executor") == "safe_qwen":
+        import terminal_run
+        return terminal_run.cli(args, root, config)
+    if args.command == "autonomous-run" and getattr(args, "safeqwen_policy", None):
+        raise ValueError("--safeqwen-policy requires --executor safe_qwen")
     if args.command == "autonomous-run":
         commands = [json.loads(s) if s.lstrip().startswith("[") else shlex.split(s) for s in args.verify]
         if not all(safe_command(c) for c in commands):
@@ -2222,6 +2227,9 @@ def cli(args, root, config=None):
     store = Store(runs, args.run_id)
     with exclusive_lock(runs / ".durable-controller.lock"):
         store.load()
+        if store.state["options"]["config"].get("executor") == "safe_qwen":
+            import terminal_run
+            return terminal_run.resume(store, args)
         return resume(store, progress=not args.quiet, revalidate_environment=args.revalidate_environment,
                       budgets=budget_args(args), reviewer=True if args.reviewer else None)
 

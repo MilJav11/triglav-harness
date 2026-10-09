@@ -1,0 +1,27 @@
+{
+  "executor": "safe_qwen",
+  "base_url": "http://127.0.0.1:9292",
+  "roles": {"code": "qwen-code", "critic": "nemotron-critic", "review": "gptoss-review"},
+  "startup_timeout_seconds": 900,
+  "shutdown_timeout_seconds": 60,
+  "request_timeout_seconds": 90,
+  "timeout_seconds": 600,
+  "verification_timeout_seconds": 60,
+  "min_available_ram_gb": 6,
+  "min_active_available_ram_gb": 6,
+  "max_actions": 32,
+  "max_retries": 0,
+  "max_file_bytes": 65536,
+  "max_output_chars": 16000,
+  "safe_qwen_gateway": {
+    "binary": "../runtime/llama-swap.exe",
+    "pid_file": "../runtime/llama-swap.pid"
+  },
+  "safe_qwen_runtime": {
+    "code": {
+      "binary": "../runtime/llama-server.exe",
+      "model": "../runtime/qwen-model.gguf",
+      "gateway_config": "../runtime/llama-swap.yaml"
+    }
+  }
+}

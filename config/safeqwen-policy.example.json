@@ -1,0 +1,7 @@
+{
+  "readable": ["calculator.py", "test_calculator.py"],
+  "writable": ["calculator.py"],
+  "mode": "mutation",
+  "max_actions": 32,
+  "unit_timeout_seconds": 600
+}

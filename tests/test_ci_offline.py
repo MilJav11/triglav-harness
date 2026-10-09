@@ -56,6 +56,7 @@ class GuardTests(unittest.TestCase):
 
     def test_reviewed_verifier_and_broker_are_allowed(self):
         self.policy.verifier([sys.executable, "-m", "unittest", "test_add"], self.fixture)
+        self.policy.verifier([sys.executable, "-m", "unittest", "test_calculator.py"], self.fixture)
         self.policy.verifier([str(self.policy.git), "-c", f"safe.directory={self.fixture.resolve()}",
                               "-c", "diff.external=", "diff", "--no-ext-diff",
                               "--no-textconv", "--check"], self.fixture)

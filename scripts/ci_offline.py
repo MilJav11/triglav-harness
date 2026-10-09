@@ -15,7 +15,16 @@ import unittest
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
-MODULES = {"test_ci_offline": 10, "test_executor_protocol": 8, "test_planner_protocol": 14}
+MODULES = {"test_ci_offline": 10, "test_executor_protocol": 8, "test_planner_protocol": 14, "test_safe_qwen_worker": 39, "test_safe_qwen_integration": 40,
+           **{f"test_reviewer_wave6.TestReviewerWave6.{name}": 1 for name in (
+               "test_42_final_verification_runs_after_approve",
+               "test_43_old_verifier_pass_cannot_substitute_final_verification",
+               "test_44_final_verification_failure_no_checkpoint",
+               "test_45_scope_failure_during_final_verification_no_checkpoint",
+               "test_46_candidate_changed_after_approve_no_checkpoint",
+               "test_47_environment_changed_after_approve_no_checkpoint",
+               "test_49_controller_creates_trusted_checkpoint_only_after_all_steps_pass",
+               "test_50_trusted_checkpoint_updates_last_verified_checkpoint_and_verified_progress")}}
 READ_ONLY_GIT = {"rev-parse", "status", "ls-files", "diff", "show", "log", "ls-tree", "cat-file", "symbolic-ref"}
 FIXTURE_GIT = READ_ONLY_GIT | {"init", "add", "commit", "hash-object", "write-tree"}
 
@@ -93,9 +102,9 @@ class ProcessPolicy:
                 and Path(cwd).resolve().is_relative_to(self.temporary)):
             return
         if (Path(executable).resolve() != self.python
-                or list(command[1:]) != ["-m", "unittest", "test_add"]
+                or list(command[1:]) not in (["-m", "unittest", "test_add"], ["-m", "unittest", "test_calculator.py"])
                 or not Path(cwd).resolve().is_relative_to(self.temporary)):
-            self.fail("Only the reviewed addition and Git whitespace fixture verifiers are allowed")
+            self.fail("Only the reviewed addition/calculator and Git whitespace fixture verifiers are allowed")
 
     def audit(self, event, args):
         # platform.uname reads the local hostname; this event performs no network I/O.
@@ -181,7 +190,7 @@ def main():
                 raise OfflineViolation("Unexpected CLI help output")
             if policy.denied:
                 raise OfflineViolation("A prohibited operation was attempted")
-            print(f"PASS: 10 guard cases + 22 protocol cases; CLI help; "
+            print(f"PASS: {sum(MODULES.values())} reviewed offline cases; CLI help; "
                   f"{policy.head_probes} real HEAD probes; model calls 0", flush=True)
     return 0
 
