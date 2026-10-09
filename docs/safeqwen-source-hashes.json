@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "historical_sha256": {
+    "safe_qwen_worker.py": "a28a1ea8cf03636b89174b91d5fbe3d39f54e4389ce3876faf3c69ac3791de45",
+    "tool_protocol.py": "489b8c238ea335508d3647a7fd9eba1b17acf8f68e346ff19e43b0c3ba318c2a",
+    "integration_shim.py": "f21f76fb186528de9b5b8f8f363d8271c8b5bdc8dd0e31bc4055e8fbc8aca9e7",
+    "safe_executor_binding.py": "b5e6eb404398dcccf18ead310c072f4ac157d85b9e510a32700f3bb2aa29ad10",
+    "terminal_run.py": "d59cf935823c9eb85166488560d8d8eb176a00e3772e043be2d29c6bee3a9f28"
+  },
+  "migrated_sha256": {
+    "safe_qwen_worker.py": "7fb0d082c1fe3a93a200b6168d54421daad42ceb77d39d1f3ab2fff9e91bd26f",
+    "tool_protocol.py": "489b8c238ea335508d3647a7fd9eba1b17acf8f68e346ff19e43b0c3ba318c2a",
+    "integration_shim.py": "b94a92f2634c08817b02b25457c2d817388753d313c5c37b03b419ffe9be46df",
+    "safe_executor_binding.py": "78ec5600456ba97d4084c867162ceb98031688630f81be92d2fbfe9b05c98585",
+    "terminal_run.py": "73673bfab9ffd101fd0ad5e01fe049890e7df3d8865c0dee8940932a0d3b3bbf"
+  },
+  "migrated_line_endings": "LF, enforced for these five files by .gitattributes",
+  "qualification": "Phase 8A offline validation only; no live equivalence to historical TQ-02R claimed"
+}

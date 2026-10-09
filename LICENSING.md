@@ -21,6 +21,19 @@ similarity search or a guarantee of copyright eligibility for AI-assisted output
 The MIT grant covers only rights held by the contributor; it cannot license
 third-party material.
 
+## SafeQwen source migration
+
+The five SafeQwen components and reviewed development tests were identified by
+preserved source hashes, audited before migration and adapted as eligible
+original project software under the existing MIT scope. Imports use the standard
+library and included modules; no vendored third-party implementation, additional
+copyright notice, model weight or native binary was imported. This relies on the
+same owner's personal-project provenance attestation above; no independent
+similarity/rights-clearance guarantee is added. Original and migrated hashes and
+changes are recorded in [source migration](docs/SAFEQWEN_SOURCE.md). Separately
+provisioned Qwen, Nemotron, GPT-OSS and runtime artifacts retain their own terms;
+review their exact versions/licenses before Phase 8B. Artwork scope is unchanged.
+
 ## Software and brand scope
 
 The MIT software scope includes eligible original controller code, tests,

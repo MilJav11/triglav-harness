@@ -7,10 +7,12 @@ from the historical external SafeQwen deployment. The controller, tests and
 configuration templates are included. Local models, gateways, binaries and
 third-party CLIs must be provisioned separately.
 
-The SafeQwen worker and launcher are absent. TQ-02R is reported historical external
-qualification; cloning this snapshot does not reproduce it. It supports a bounded
+The SafeQwen worker and launcher are now [migrated with offline validation](../SAFEQWEN.md).
+TQ-02R remains historical external qualification; cloning does not reproduce it. It supports a bounded
 fixture claim, not a general autonomous-engineering safety guarantee.
 
+- [Current SafeQwen integration and CLI](../SAFEQWEN.md)
+- [Original/migrated SafeQwen source identities](../SAFEQWEN_SOURCE.md)
 - [Current snapshot architecture](../../ARCHITECTURE.md)
 - [Historical external route architecture](ARCHITECTURE.md)
 - [Sanitized historical qualification](QUALIFICATION.md)

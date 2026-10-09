@@ -2,6 +2,11 @@
 
 PUBLIC PREVIEW — Phase 4 AS-IS baseline, 9 October 2026. Production HEAD: `c96e4a3565cb3e67df67de9b89c49753e4b34791`. Claim IDs resolve in the [public evidence summary](EVIDENCE_SUMMARY.md#claim-map).
 
+This page describes the **historical external route**. The
+[current Phase 8A integration](../SAFEQWEN.md) replaces host-specific launch
+assumptions/global hooks with configurable runtime ownership and direct binding;
+it has offline validation only and is not claimed equivalent.
+
 ## Component responsibilities
 
 | Component | Code boundary and responsibility |

@@ -2,14 +2,16 @@
 
 PUBLIC PREVIEW. This is an editorial summary inherited from the private project's
 reviewed documentation. Raw evidence, private run identifiers, Store references,
-fixture commits, source identity pins and machine paths are intentionally omitted.
+fixture commits, private runtime pins and machine paths are intentionally omitted.
 Those records were not accessed or replayed during the clean export audit.
 
 ## Evidence interpretation
 
 Current source presence, current offline tests, historical reports and proposed
 work have different scope. A recorded result is not a reproduction package.
-The controller and tests are present here; the SafeQwen launcher/worker are not.
+The controller and tests are present. Phase 8A adds a
+[reviewed SafeQwen migration](../SAFEQWEN.md) with [separate source hashes](../SAFEQWEN_SOURCE.md);
+its offline validation does not reproduce the historical deployment.
 
 | Historical case | Reported outcome |
 |---|---|
@@ -65,7 +67,7 @@ summary labels, not links to unpublished evidence or independent attestations.
 | **Q05** | Historical documentation reported scoped artifact integrity checks; none was rerun here |
 | **S01** | Cline prompt restrictions did not establish preventive no-shell confinement |
 | **S02** | Historical SafeQwen had a closed registry and exact file policy, not an OS sandbox |
-| **S03** | External source/policy fingerprints and binding hooks are absent from this snapshot |
+| **S03** | Historical external source/policy fingerprints used scoped global hooks; Phase 8A replaces those with direct conditional binding, independently validated offline |
 | **S04** | Worker output and diagnostics require independent structural validation |
 | **L01** | Recorded false trust limits semantic claims |
 | **L02** | Top-level and nested criterion reporting remain inconsistent |
