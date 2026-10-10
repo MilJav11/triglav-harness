@@ -95,6 +95,10 @@ behavior and runs scripted model responses with disposable fixtures. It does
 not install dependencies, start a gateway or run models. It executes trusted
 fixture code and Git/Python subprocesses; use the committed checkout.
 
+For a different workstation, use the [portable Windows setup baseline](docs/WINDOWS_SETUP.md)
+for public dependency links, operator-local three-role examples and the exact
+remaining HotPin resource-policy integration seam. Clone readiness remains PARTIAL.
+
 For live use, first read the [runbook](RUNBOOK.md) and
 [SafeQwen setup and limits](docs/SAFEQWEN.md). Provision compatible llama-swap,
 model servers, weights and any optional executor CLIs separately, then adapt the

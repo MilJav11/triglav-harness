@@ -1,0 +1,46 @@
+{
+  "executor": "safe_qwen",
+  "base_url": "http://127.0.0.1:9292",
+  "roles": {"code": "qwen-code", "critic": "nemotron-critic", "review": "gptoss-review"},
+  "model_metadata": {
+    "qwen-code": {"display_name": "Qwen3-Coder-30B-A3B-Instruct-Q4_K_M", "runtime": "llama.cpp"},
+    "nemotron-critic": {"display_name": "Nemotron-3.5-Lightning-30B-A3B-Q4_K_M", "runtime": "llama.cpp"},
+    "gptoss-review": {"display_name": "GPT-OSS-120B-Q4_K_M", "runtime": "HotPin"}
+  },
+  "startup_timeout_seconds": 900,
+  "shutdown_timeout_seconds": 60,
+  "request_timeout_seconds": 300,
+  "timeout_seconds": 600,
+  "verification_timeout_seconds": 60,
+  "min_available_ram_gb": 44,
+  "code_min_available_ram_gb": 16,
+  "min_active_available_ram_gb": 6,
+  "memory_recovery_timeout_seconds": 30,
+  "max_actions": 32,
+  "max_retries": 0,
+  "max_file_bytes": 65536,
+  "max_output_chars": 16000,
+  "critic": {"min_available_ram_gb": 30, "request_timeout_seconds": 180, "max_input_chars": 16000},
+  "reviewer": {"max_input_chars": 20000},
+  "safe_qwen_gateway": {
+    "binary": "../runtime/llama-swap.exe",
+    "pid_file": "../runtime/llama-swap.pid"
+  },
+  "safe_qwen_runtime": {
+    "code": {
+      "binary": "../runtime/llama.cpp/llama-server.exe",
+      "model": "../runtime/models/qwen/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf",
+      "gateway_config": "../runtime/llama-swap.yaml"
+    },
+    "critic": {
+      "binary": "../runtime/llama.cpp/llama-server.exe",
+      "model": "../runtime/models/nemotron/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-Q4_K_M.gguf",
+      "gateway_config": "../runtime/llama-swap.yaml"
+    },
+    "review": {
+      "binary": "../runtime/hotpin/llama-server.exe",
+      "model": "../runtime/models/gptoss/gpt-oss-120b-Q4_K_M-00001-of-00002.gguf",
+      "gateway_config": "../runtime/llama-swap.yaml"
+    }
+  }
+}

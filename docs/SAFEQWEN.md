@@ -42,6 +42,14 @@ checkpoint. Worker submit and zero exit remain untrusted.
 
 ## Windows prerequisites and configuration
 
+See [portable Windows setup](WINDOWS_SETUP.md) for acquisition links and the
+[three-role JSON](../config/safeqwen-three-model.example.json) /
+[dedicated gateway YAML](../config/llama-swap.safeqwen.example.yaml) examples.
+These are preflight templates, not a qualified live deployment: profile-free
+SafeQwen cannot currently verify HotPin inheritance or enforce the recorded
+32 GiB reviewer ceiling. The [Phase 2B seam](WINDOWS_SETUP.md#phase-2b-integration-seam)
+requires production code changes; adding roles alone does not close it.
+
 Use Python 3.11+, Git, a committed TRIGLAV checkout, and a separate clean committed
 Git target repository with trusted tests. The new Python modules use only the
 standard library and included controller modules. Provision a compatible local
@@ -127,7 +135,8 @@ resources for `critic` and `review`, place global `--critic` before
 `autonomous-run`, and add `--reviewer --review-policy three-model`. Exit 0 means
 COMPLETED or validated dry-run; exit 1 means stopped/error; exit 2 is a
 non-completed result. Phase 8B used separately provisioned private operator
-tooling; this example is setup guidance, not the qualified invocation.
+tooling; this example is setup guidance, not the qualified invocation. The public
+resource-policy seam above remains open even when all three roles are configured.
 
 Inspect with `python -B harness.py status --run-id <operator-run-id> --json`.
 Resume through `python -B harness.py autonomous-resume --run-id <operator-run-id>`;
