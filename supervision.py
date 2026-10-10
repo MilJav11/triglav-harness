@@ -151,7 +151,8 @@ class Supervisor:
         import environment
         self.require_no_ambiguous_model()
         config = self.store.state["options"]["config"]
-        if config.get("executor") == "safe_qwen":
+        from safe_executor_binding import is_safe_qwen_config
+        if is_safe_qwen_config(config) or self.store.state["options"].get("work_unit_executor", {}).get("kind") == "safe_qwen":
             from safe_executor_binding import model_starting
             return model_starting(self, role)
         text = (environment.ROOT / "runs/swap-profile.yaml").read_text(encoding="utf-8")

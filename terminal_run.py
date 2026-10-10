@@ -169,8 +169,8 @@ def cli(args, root, config):
                          if args.critic and args.reviewer else "intermediate only; no trusted checkpoint"}
     if "safe_qwen_reviewer_policy" in cfg:
         summary["reviewer_resource_policy"] = {
-            **cfg["safe_qwen_reviewer_policy"], "native_enforcement": "not_implemented",
-            "dispatch": "blocked"}
+            **cfg["safe_qwen_reviewer_policy"], "native_enforcement": "required_before_inference",
+            "dispatch": "subject_to_live_native_gates"}
     if args.dry_run:
         return {**summary, "executor": "safe_qwen", "safe_qwen_identity": cfg["safe_qwen_identity"],
                 "verification_timeout_seconds": verification_timeout(cfg)}

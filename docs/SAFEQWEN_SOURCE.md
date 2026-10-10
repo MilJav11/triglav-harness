@@ -30,6 +30,13 @@ The original and migrated hashes above remain historical snapshots. The separate
 contract-only slice's five SafeQwen source files. It is not a live runtime
 manifest. See [policy contract and blocked native dispatch](HOTPIN_POLICY.md).
 
+## Phase 2B.3 source snapshot
+
+The separate `phase_2b_3_sha256` and `phase_2b_3_native_sha256` maps record the
+SafeQwen components and Gateway/Supervisor/Windows enforcement source for this
+slice. Original, migrated and Phase 2B.2 snapshots are preserved. These hashes
+identify source, not a live qualified deployment. See [native policy gates](HOTPIN_POLICY.md).
+
 ## Changes and assumptions
 
 | Component | Migration changes |

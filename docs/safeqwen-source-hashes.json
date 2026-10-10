@@ -23,5 +23,18 @@
     "safe_executor_binding.py": "4c9b44226a7bf29a5a33f4b6ba9422055898f6f970348cddc61a8c8fe790a434",
     "terminal_run.py": "a16adfe28234c075b6e13f1fa2e7c4e18583a17f31b8004d036fec15d65b3964"
   },
-  "phase_2b_2_scope": "Policy contract and expert identity only; native HotPin reviewer dispatch blocked; no live qualification."
+  "phase_2b_2_scope": "Policy contract and expert identity only; native HotPin reviewer dispatch blocked; no live qualification.",
+  "phase_2b_3_sha256": {
+    "safe_qwen_worker.py": "7fb0d082c1fe3a93a200b6168d54421daad42ceb77d39d1f3ab2fff9e91bd26f",
+    "tool_protocol.py": "489b8c238ea335508d3647a7fd9eba1b17acf8f68e346ff19e43b0c3ba318c2a",
+    "integration_shim.py": "c99d7b96d4b8be8ba44f09ea2782b1e80228a1cef3a1c8ad849740463f130f89",
+    "safe_executor_binding.py": "b6ef1d5346ce39f48e7d60db8c662669dc2034ee0bc7251f09c8ed367f37935f",
+    "terminal_run.py": "a277f15914bc5d87e63d7a8f3ed0ca57e32df28048f6a3011be3029b68578905"
+  },
+  "phase_2b_3_native_sha256": {
+    "harness.py": "4f060753747cce9c2e9197e6e7a324dd60dcf1fffc90d1bba44231066052556d",
+    "supervision.py": "6bbe3404254fc1b43a564b5c6ce3d5c6d6d59f05fc602e27e380b925ee48b426",
+    "winprocess.py": "78dcda141a1bcad90150b518816eb72d931aa8cd5aab321906f167183fd9e220"
+  },
+  "phase_2b_3_scope": "Native HotPin reviewer enforcement with offline fake processes/handles only; no live qualification."
 }

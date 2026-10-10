@@ -1,4 +1,4 @@
-# Schematic only. See docs/WINDOWS_SETUP.md before use; no live qualification.
+# Schematic only. See docs/WINDOWS_SETUP.md; each host needs independent validation.
 # Replace C:/TRIGLAV-runtime with your absolute runtime directory everywhere.
 # JSON runtime identities must resolve to the SAME files as these commands.
 # Keep each entire command on ONE line for safe_executor_binding.model_starting.
@@ -28,5 +28,5 @@ models:
       - "LLAMA_HOT_EXPERTS=C:/TRIGLAV-runtime/hot_top4.txt"
     ttl: 300
     checkEndpoint: /health
-# This env declaration does not verify inheritance or enforce a working-set cap.
-# SafeQwen currently cannot express Phase 8B's checked Top4 / 32 GiB policy.
+# Match this expert asset with the explicit policy and approved digest in JSON.
+# The public native gate verifies inheritance/identity and hard-cap readback.

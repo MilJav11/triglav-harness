@@ -1,13 +1,14 @@
 # SafeQwen public integration (Phase 8A / Phase 8B status)
 
-Experimental, explicitly selected integration on native Windows. The public
-source passed 129/129 guarded offline cases; **Phase 8B Stage 2 completed
-successfully** on one bounded fixture using private operator tooling and locally
-provisioned runtimes. See the [qualification summary](triglav/QUALIFICATION.md#phase-8b-stage-2).
-Clone readiness remains **PARTIAL**: neither that full deployment nor historical
-TQ-02R is reproduced by cloning. No model weights, gateway, native binaries,
-private operator helpers or retained qualification fixture/Store are included.
-See the [missing integration assets](triglav/README.md#dependencies-and-missing-integration-assets).
+Experimental, explicitly selected integration on native Windows. Public Run 003
+completed one bounded Qwen -> Nemotron -> GPT-OSS task with ten frozen tests,
+reviewer APPROVE, fresh final verification, a validated trusted checkpoint and
+owned cleanup. See [current qualification](triglav/QUALIFICATION.md#public-run-003).
+The guarded selection now contains 209 offline cases; offline success is not
+live qualification. Models/binaries/expert assets remain externally provisioned.
+Use [the portable demo recipe](WINDOWS_SETUP.md#local-qwen-demo) and
+[public frozen fixture](../examples/calculator/README.md). Historical Phase 8B
+and TQ-02R remain separate records, not fresh-clone guarantees.
 
 ## Components and authority
 
@@ -45,13 +46,12 @@ checkpoint. Worker submit and zero exit remain untrusted.
 See [portable Windows setup](WINDOWS_SETUP.md) for acquisition links and the
 [three-role JSON](../config/safeqwen-three-model.example.json) /
 [dedicated gateway YAML](../config/llama-swap.safeqwen.example.yaml) examples.
-These templates are not a qualified live deployment. The
-[Phase 2B.2 policy contract](HOTPIN_POLICY.md) adds expert-file validation and
-identity binding, but **live SafeQwen HotPin dispatch is blocked** pending native
-inheritance/cap enforcement. The three-model example declares HotPin and now
-requires the explicit policy even for review dry-run; its configuration has not
-been activated or rewritten. Adding roles alone does not close the
-[remaining native seam](WINDOWS_SETUP.md#phase-2b-integration-seam).
+Templates require provisioned assets and independently validated runtime flags.
+The three-model JSON includes the explicit [HotPin policy](HOTPIN_POLICY.md)
+with an invalid digest placeholder that must be replaced by an operator-approved
+expected identity. Native gates enforce ownership, inheritance and 32 GiB hard
+working-set readback, including cached reuse. Run 003 exercised them on one host;
+a new host is not qualified by copying templates.
 
 Use Python 3.11+, Git, a committed TRIGLAV checkout, and a separate clean committed
 Git target repository with trusted tests. The new Python modules use only the
@@ -100,9 +100,9 @@ remote OpenAI service adapter. No automatic gateway startup is provided.
    verify each new deployment independently. Phase 8B validates only its recorded host. Gateway configuration containing secrets
    should stay outside the repository. Never publish local runtime logs/evidence.
 5. Implicit `review_profiles`/HotPin template deployment is unsupported for this
-   route and refused. Provision explicit role commands instead; only the explicit private Stage 2 deployment was live-qualified;
+   route and refused. Provision explicit role commands instead; Public Run 003 was live-qualified;
    arbitrary operator configurations remain unqualified. Use operator configuration without the
-   inherited machine-specific startup templates.
+   legacy profile startup templates.
 
 ## Actual CLI
 
@@ -113,7 +113,7 @@ runtime files, validate without contacting the gateway or creating a run:
 python -B harness.py --config config/safeqwen.local.json autonomous-run `
   --executor safe_qwen --safeqwen-policy config/safeqwen-policy.local.json `
   --repo ../disposable-calculator --task "Implement multiply in calculator.py" `
-  --verify '["python", "-m", "unittest", "test_calculator.py"]' `
+  --verify "python -m unittest test_calculator.py" `
   --acceptance "multiply returns the correct product" `
   --allow calculator.py --forbid test_calculator.py --dry-run --quiet
 ```
@@ -137,9 +137,8 @@ READY result (CLI exit 2), not acceptance. For the full gated path, add runtime
 resources for `critic` and `review`, place global `--critic` before
 `autonomous-run`, and add `--reviewer --review-policy three-model`. Exit 0 means
 COMPLETED or validated dry-run; exit 1 means stopped/error; exit 2 is a
-non-completed result. Phase 8B used separately provisioned private operator
-tooling; this example is setup guidance, not the qualified invocation. The public
-resource-policy seam above remains open even when all three roles are configured.
+non-completed result. Public Run 003 exercised this complete route with explicit native gates;
+new operator deployments still require their own controlled validation.
 
 Inspect with `python -B harness.py status --run-id <operator-run-id> --json`.
 Resume through `python -B harness.py autonomous-resume --run-id <operator-run-id>`;
@@ -192,10 +191,11 @@ Run only the reviewed guarded command on a committed native Windows checkout:
 python -B scripts/ci_offline.py
 ```
 
-The current selection is 129 tests: 10 guard, 22 existing protocol, 39 worker,
+The original selection was 129 tests: 10 guard, 22 existing protocol, 39 worker,
 40 integration and 8 selected existing final-verification/checkpoint regressions, plus 10
 milestone verifier timeout regressions.
-Expected terminal summary: `PASS: 129 reviewed offline cases; CLI help; ...;
+The current selection adds 26 policy and 54 native cases (209 total).
+Expected terminal summary: `PASS: 209 reviewed offline cases; CLI help; ...;
 model calls 0`. Responses are scripted; the real controller, deterministic fixture
 verifiers and checkpoint code execute. Unmocked Gateway calls, sockets and
 unreviewed process/verifier commands are denied. Imports are checked for no model,

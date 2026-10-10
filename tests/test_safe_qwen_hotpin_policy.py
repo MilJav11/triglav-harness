@@ -179,50 +179,53 @@ class HotPinPolicyTests(unittest.TestCase):
         self.assertIsNone(binding.reviewer_expert_identity(generic))
         self.assertEqual(binding.restore_worker(generic).policy, worker.policy)
 
-    def test_dry_run_reports_blocked_native_enforcement(self):
+    def test_dry_run_reports_required_native_enforcement(self):
         cfg = self.cli_config()
         result = manager.cli(self.fixture.args(critic=True, reviewer=True, review_policy="three-model"),
                              self.fixture.root, cfg)
         self.assertTrue(result["dry_run"])
-        self.assertEqual(result["reviewer_resource_policy"]["native_enforcement"], "not_implemented")
-        self.assertEqual(result["reviewer_resource_policy"]["dispatch"], "blocked")
+        self.assertEqual(result["reviewer_resource_policy"]["native_enforcement"], "required_before_inference")
+        self.assertEqual(result["reviewer_resource_policy"]["dispatch"], "subject_to_live_native_gates")
 
-    def test_live_cli_is_refused_before_gateway_or_run_creation(self):
+    def test_failed_native_preflight_refuses_cli_before_gateway_or_run_creation(self):
         cfg = self.cli_config()
         with patch.object(harness, "Gateway") as gateway, patch.object(launch, "execute_bound") as execute:
-            with patch.object(durable, "Store") as store, self.assertRaisesRegex(RuntimeError, "native enforcement"):
-                manager.cli(self.fixture.args(critic=True, reviewer=True, dry_run=False), self.fixture.root, cfg)
+            with patch.object(durable, "Store") as store, patch.object(binding, "require_reviewer_enforcement",
+                    side_effect=RuntimeError("native preflight unavailable")):
+                with self.assertRaisesRegex(RuntimeError, "native preflight"):
+                    manager.cli(self.fixture.args(critic=True, reviewer=True, dry_run=False), self.fixture.root, cfg)
         gateway.assert_not_called()
         execute.assert_not_called()
         store.assert_not_called()
 
-    def test_bound_execution_is_refused_before_manager_execution(self):
+    def test_bound_execution_delegates_to_existing_manager_after_native_preflight(self):
         worker, cfg = self.prepared()
-        with patch.object(manager, "execute") as execute, self.assertRaisesRegex(RuntimeError, "native enforcement"):
-            launch.execute_bound(self.fixture.store, worker)
-        execute.assert_not_called()
+        result = {"stop": {"cleanup": "passed"}}
+        with patch.object(manager, "execute", return_value=result) as execute:
+            self.assertEqual(launch.execute_bound(self.fixture.store, worker), result)
+        execute.assert_called_once()
 
     def test_gateway_gate_cannot_be_bypassed_by_cached_ready_role(self):
         worker, cfg = self.configure()
         gateway = harness.Gateway(cfg, None)
         gateway.active_role = "review"
         with patch.object(gateway, "request") as request, patch.object(gateway, "running") as running:
-            with patch.object(gateway, "unload") as unload, self.assertRaisesRegex(RuntimeError, "native enforcement"):
+            with patch.object(gateway, "unload") as unload, self.assertRaisesRegex(durable.DurableError, "pinned Store"):
                 gateway._switch("review")
         request.assert_not_called()
         running.assert_not_called()
         unload.assert_not_called()
 
-    def test_supervisor_dispatch_is_refused_before_registration(self):
+    def test_unsupported_native_platform_refuses_supervisor_dispatch(self):
         self.prepared()
         supervisor = SimpleNamespace(store=self.fixture.store, require_no_ambiguous_model=Mock(), register=Mock())
-        with self.assertRaisesRegex(RuntimeError, "native enforcement"):
+        with patch("ctypes.sizeof", return_value=4), self.assertRaisesRegex(RuntimeError, "native x64 Windows"):
             binding.model_starting(supervisor, "review")
         supervisor.register.assert_not_called()
         supervisor.require_no_ambiguous_model.assert_not_called()
 
-    def test_no_configuration_flag_can_enable_native_dispatch(self):
+    def test_configuration_flag_cannot_bypass_pinned_identity(self):
         worker, cfg = self.configure()
         cfg["hotpin_native_enforcement_complete"] = True
-        with self.assertRaisesRegex(RuntimeError, "native enforcement"):
-            binding.require_reviewer_enforcement(cfg)
+        with self.assertRaisesRegex(ValueError, "pinned source/configuration"):
+            binding.validate_pinned(cfg)

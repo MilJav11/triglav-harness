@@ -24,7 +24,10 @@ limited to the ephemeral GitHub runner; no local model/gateway/CLI is installed.
 - Forty SafeQwen integration/ownership/recovery tests and eight selected
   existing final-verification/checkpoint regressions, plus ten milestone timeout regressions: 129 original cases.
 - Twenty-six HotPin policy contract, expert identity, resume, compatibility and
-  blocked-dispatch regressions using disposable fake assets: 155 cases in total.
+  native-preflight regressions using disposable fake assets.
+- Fifty-four native enforcement cases with fake processes/Windows handles and
+  scripted responses: 209 cases in total. These include controller acceptance,
+  refusal after failed enforcement, cached/TTL checks and legacy compatibility.
 - Import and capture CLI --help and SafeQwen dry-run output.
 
 The protocol tests use mocked or scripted model replies. Planner correction cases

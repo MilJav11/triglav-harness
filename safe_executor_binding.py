@@ -73,6 +73,9 @@ def validate_reviewer_policy(cfg):
         raise ValueError("SafeQwen HotPin requires a trusted lowercase SHA-256")
     if cfg.get("review_profile") or cfg.get("review_profiles"):
         raise ValueError("SafeQwen HotPin resource policy cannot select legacy profiles")
+    aliases = list(cfg.get("roles", {}).values())
+    if len(aliases) != len(set(aliases)):
+        raise ValueError("SafeQwen HotPin requires distinct model aliases for each role")
     return policy
 
 
@@ -109,11 +112,107 @@ def configure_reviewer_policy(cfg, base):
 
 
 def require_reviewer_enforcement(cfg, role=None):
-    """Deliberate fail-closed gate until a separately reviewed native implementation."""
+    """Preflight native support and bound expert bytes; live ownership is checked at dispatch."""
     if role not in (None, "review"):
         return
     if validate_reviewer_policy(cfg) is not None:
-        raise RuntimeError("SafeQwen HotPin reviewer native enforcement is not implemented; validation/dry-run only")
+        import ctypes
+        if os.name != "nt" or ctypes.sizeof(ctypes.c_void_p) != 8:
+            raise RuntimeError("SafeQwen HotPin enforcement requires native x64 Windows Python")
+        reviewer_expert_identity(cfg)
+
+
+def is_safe_qwen_config(cfg):
+    return type(cfg) is dict and (cfg.get("executor") == "safe_qwen" or any(
+        key in cfg for key in ("safe_qwen_identity", "safe_qwen_runtime", "safe_qwen_reviewer_policy")))
+
+
+def gateway_config(gateway):
+    """Use Store provenance as well as the executor key; reject divergent live routing."""
+    from durable import DurableError
+    supervisor = gateway.supervisor
+    state = getattr(getattr(supervisor, "store", None), "state", {})
+    options = state.get("options", {})
+    owned = options.get("config")
+    recorded = options.get("work_unit_executor", {}).get("kind")
+    if not (is_safe_qwen_config(gateway.config) or is_safe_qwen_config(owned) or recorded == "safe_qwen"):
+        return None
+    if supervisor is None or owned is None or gateway.config != owned:
+        raise DurableError("SafeQwen Gateway differs from the pinned Store configuration")
+    validate_pinned(owned)
+    return owned
+
+
+def reviewer_owned_child(gateway, cfg, running, processes):
+    """Observe without granting cleanup authority; retain the exact launch child binding."""
+    from durable import DurableError
+    supervisor = gateway.supervisor
+    children = supervisor.reconcile()
+    supervisor.require_no_ambiguous_model(children)
+    active = [c for c in children if c["purpose"] == "model_server"
+              and c["state"] in {"STARTING", "UNKNOWN", "RUNNING", "STOPPING"}]
+    if (len(active) != 1 or active[0]["state"] != "RUNNING"
+            or active[0]["child_id"] != gateway.active_model_child_id):
+        raise DurableError("HotPin reviewer owned process is unavailable or ambiguous")
+    child = active[0]
+    alias = cfg["roles"]["review"]
+    expected = os.path.normcase(str(Path(cfg["safe_qwen_runtime"]["review"]["binary"]).resolve()))
+    parent_expected = os.path.normcase(str(Path(cfg["safe_qwen_gateway"]["binary"]).resolve()))
+    if (child.get("role") != "review" or child.get("alias") != alias
+            or child.get("containment") != "delegated" or child.get("boot") != supervisor.boot()
+            or child.get("run_id") != supervisor.store.state["run_id"]
+            or not child.get("identity") or not child["identity"].get("created")
+            or os.path.normcase(child["executable"]) != expected
+            or child["identity"].get("executable") != expected
+            or not child.get("parent_identity")
+            or child["parent_identity"].get("executable") != parent_expected
+            or supervisor.inspect(child["pid"]) != child["identity"]
+            or supervisor.inspect(child["parent_pid"]) != child["parent_identity"]
+            or len(processes) != 1 or processes[0].get("pid") != child["pid"]
+            or processes[0].get("parent_pid") != child["parent_pid"]
+            or os.path.normcase(str(Path(processes[0].get("path", "")).resolve())) != expected
+            or len(running) != 1 or type(running[0]) is not dict
+            or running[0].get("model") != alias or running[0].get("state") != "ready"):
+        raise DurableError("HotPin reviewer process/parent/alias identity mismatch")
+    return child
+
+
+def enforce_reviewer(gateway, running):
+    """Gate every HotPin review on pinned resources, owned handles and hard-cap readback."""
+    import environment
+    import winprocess
+    from durable import DurableError, current_fingerprint
+    cfg = gateway_config(gateway)
+    policy = validate_reviewer_policy(cfg) if cfg is not None else None
+    if policy is None:
+        return
+    require_reviewer_enforcement(cfg, "review")
+    drift = environment.compare(gateway.supervisor.store.state["environment"],
+                                current_fingerprint(gateway.supervisor.store))
+    if drift["decision"] in {"UNSAFE", "REVALIDATION_REQUIRED"}:
+        raise DurableError("SafeQwen runtime changed before reviewer inference")
+    child = reviewer_owned_child(gateway, cfg, running, winprocess.servers())
+    inherited = winprocess.hotpin_environment(child["pid"], expected_identity=child["identity"])
+    if (type(inherited) is not str or not inherited or inherited.startswith(("\\\\", "//"))
+            or not Path(inherited).is_absolute()
+            or os.path.normcase(str(Path(inherited).resolve(strict=True))) !=
+               os.path.normcase(policy["hot_experts"])):
+        raise DurableError("HotPin reviewer did not inherit the bound expert asset")
+    reviewer_expert_identity(cfg)
+    limit = winprocess.limit_working_set(child["pid"], policy["max_working_set_gb"],
+                                        expected_identity=child["identity"])
+    if (type(limit) is not dict or limit.get("pid") != child["pid"]
+            or type(limit.get("flags")) is not int or not limit["flags"] & 4 or limit["flags"] & 8
+            or type(limit.get("maximum_gb")) not in (int, float)
+            or not math.isfinite(limit["maximum_gb"]) or not 0 < limit["maximum_gb"] <= 32):
+        raise DurableError("HotPin reviewer hard working-set maximum is unproven")
+    reviewer_expert_identity(cfg)
+    if reviewer_owned_child(gateway, cfg, gateway.running(), winprocess.servers())["identity"] != child["identity"]:
+        raise DurableError("HotPin reviewer identity changed during native enforcement")
+    gateway.log.emit("hotpin_review_gate", child_id=child["child_id"], pid=child["pid"],
+                     process_identity_sha256=digest(child["identity"]),
+                     policy_sha256=digest(policy), expert_sha256=policy["hot_experts_sha256"],
+                     maximum_gb=limit["maximum_gb"], flags=limit["flags"])
 
 
 def validate_config(cfg):

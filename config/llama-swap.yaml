@@ -1,3 +1,4 @@
+# Legacy custom-executor template: replace fictional C:/TRIGLAV-runtime paths.
 # llama-swap v260. Start with -listen 127.0.0.1:9292; dedicate this instance to the harness.
 # Edit paths/arguments here when changing a role's backing model.
 healthCheckTimeout: 900
@@ -8,8 +9,8 @@ logToStdout: "proxy,upstream,http"
 models:
   llm-code:
     cmd: >-
-      "C:/AI/runtimes/llama.cpp/bin/llama-server.exe"
-      --model "C:/AI/models/Qwen3-Coder-30B-A3B/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf"
+      "C:/TRIGLAV-runtime/llama.cpp/llama-server.exe"
+      --model "C:/TRIGLAV-runtime/models/qwen/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf"
       --host 127.0.0.1 --port ${PORT}
       --ctx-size 32768 --threads 8 --flash-attn on
       --cache-type-k q8_0 --cache-type-v q8_0
@@ -25,8 +26,8 @@ models:
       context: 32768
   llm-critic:
     cmd: >-
-      "C:/AI/runtimes/llama.cpp/bin/llama-server.exe"
-      --model "C:/AI/models/Nemotron-3.5-Lightning-30B-A3B/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-Q4_K_M.gguf"
+      "C:/TRIGLAV-runtime/llama.cpp/llama-server.exe"
+      --model "C:/TRIGLAV-runtime/models/nemotron/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-Q4_K_M.gguf"
       --host 127.0.0.1 --port ${PORT}
       --ctx-size 4096 --parallel 1 --threads 8 --threads-batch 8
       --batch-size 256 --ubatch-size 128 --cpu-moe --gpu-layers auto
@@ -42,8 +43,8 @@ models:
       context: 4096
   llm-review:
     cmd: >-
-      "C:/AI/runtimes/hotpin/llama.cpp/build/bin/Release/llama-server.exe"
-      --model "C:/AI/models/GPT-OSS-120B-Q4_K_M/gpt-oss-120b-Q4_K_M-00001-of-00002.gguf"
+      "C:/TRIGLAV-runtime/hotpin/llama-server.exe"
+      --model "C:/TRIGLAV-runtime/models/gptoss/gpt-oss-120b-Q4_K_M-00001-of-00002.gguf"
       --host 127.0.0.1 --port ${PORT}
       --ctx-size 8192 --threads 8 --flash-attn on
       --fit on --fit-target 768 --no-repack --mmap --verbosity 4

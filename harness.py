@@ -529,6 +529,7 @@ class Gateway:
     def __init__(self, config: dict, log: EventLog):
         self.config, self.log = config, log
         self.active_role: str | None = None
+        self.active_model_child_id = None
         self.supervisor = None
         self.execution_deadline = None
 
@@ -628,6 +629,7 @@ class Gateway:
         processes = servers()
         if not before and not processes:
             self.active_role = None
+            self.active_model_child_id = None
             return
         initial_ram = available_ram_gb()
         self.log.emit("model_unload_start", running=before, processes=processes, available_ram_gb=initial_ram)
@@ -665,6 +667,7 @@ class Gateway:
                     self.log.emit("model_unloaded", available_ram_gb=current_ram, processes=[],
                                   shutdown_duration_seconds=round(time.monotonic() - start, 3))
                     self.active_role = None
+                    self.active_model_child_id = None
                     return
             time.sleep(1)
         raise TimeoutError(f"Model unload incomplete: running={remaining}, processes={processes}, "
@@ -681,13 +684,17 @@ class Gateway:
             return self._switch(role)
 
     def _switch(self, role: str):
-        if self.config.get("executor") == "safe_qwen" and role == "review":
-            from safe_executor_binding import require_reviewer_enforcement
-            require_reviewer_enforcement(self.config, role)
+        from safe_executor_binding import gateway_config, validate_reviewer_policy, require_reviewer_enforcement, enforce_reviewer
+        safe_cfg = gateway_config(self)
+        policy = validate_reviewer_policy(safe_cfg) if safe_cfg is not None and role == "review" else None
+        if policy is not None:
+            require_reviewer_enforcement(safe_cfg, role)
         if self.active_role == role:
             current = self.running()
             if any(isinstance(item, dict) and item.get("model") == self.config["roles"][role]
                    and item.get("state") == "ready" for item in current):
+                if policy is not None:
+                    enforce_reviewer(self, current)
                 self.check_active_ram()
                 return
             # TTL/external unload invalidates the cached role; preflight again.
@@ -696,6 +703,8 @@ class Gateway:
         profile = self.config.get("review_profiles", {}).get(profile_name, {})
         minimum = (profile.get("min_available_ram_gb", self.config["min_available_ram_gb"]) if role == "review"
                    else self.config.get("code_min_available_ram_gb", self.config["min_available_ram_gb"]))
+        if policy is not None:
+            minimum = policy["min_available_ram_gb"]
         if role == "critic":
             minimum = self.config.get("critic", {}).get("min_available_ram_gb", self.config["min_available_ram_gb"])
         if role == "review" and profile:
@@ -712,6 +721,8 @@ class Gateway:
             while ram is not None and ram < minimum and time.monotonic() < deadline:
                 time.sleep(1)
                 ram = available_ram_gb()
+        if policy is not None and (type(ram) not in (int, float) or not math.isfinite(ram)):
+            raise RuntimeError("HotPin reviewer available RAM cannot be established")
         if ram is not None and ram < minimum:
             raise RuntimeError(f"Cannot load {role}: {ram:.2f} GiB RAM free; required {minimum:.2f} GiB")
         if servers():
@@ -722,6 +733,7 @@ class Gateway:
         start = time.monotonic()
         model_id = urllib.parse.quote(self.config["roles"][role], safe="")
         child_id = self.supervisor.model_starting(role) if self.supervisor is not None else None
+        self.active_model_child_id = child_id
         try:
             with self.log.operation("MODEL", "startup / load", self.config["startup_timeout_seconds"], role=role):
                 self.request("GET", f"/upstream/{model_id}/health",
@@ -741,6 +753,8 @@ class Gateway:
             if profile.get("max_working_set_gb"):
                 limit = limit_working_set(actual[0]["pid"], profile["max_working_set_gb"])
                 self.log.emit("working_set_limit", profile=profile_name, **limit)
+        if policy is not None:
+            enforce_reviewer(self, current)
         self.check_active_ram()
         self.log.emit("model_started", role=role, model=self.config["roles"][role],
                       startup_duration_seconds=round(time.monotonic() - start, 2))

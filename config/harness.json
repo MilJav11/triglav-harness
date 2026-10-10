@@ -30,12 +30,12 @@
   "review_profile": "review-safe",
   "review_profiles": {
     "review-safe": {
-      "hot_experts": "C:/AI/repos/hotpin-llm/hot-files/gpt-oss-120b-q4km/hot_top4.txt",
+      "hot_experts": "C:/TRIGLAV-runtime/hot_top4.txt",
       "min_available_ram_gb": 44,
       "max_working_set_gb": 32
     },
     "review-performance": {
-      "hot_experts": "C:/AI/repos/hotpin-llm/hot-files/gpt-oss-120b-q4km/hot_top6.txt",
+      "hot_experts": "C:/TRIGLAV-runtime/hot_top6.txt",
       "min_available_ram_gb": 52
     }
   },

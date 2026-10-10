@@ -9,3 +9,12 @@ tools/llama-swap/
 /runtime/
 /config/safeqwen.local.json
 /config/safeqwen-policy.local.json
+
+# Keep operator secrets and native/model assets out of publication anywhere.
+.env
+.env.*
+*.pid
+*.exe
+*.dll
+*.gguf
+*.safetensors
