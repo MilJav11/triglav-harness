@@ -15,5 +15,13 @@
     "terminal_run.py": "73673bfab9ffd101fd0ad5e01fe049890e7df3d8865c0dee8940932a0d3b3bbf"
   },
   "migrated_line_endings": "LF, enforced for these five files by .gitattributes",
-  "qualification": "Phase 8A offline validation only; no live equivalence to historical TQ-02R claimed"
+  "qualification": "Phase 8A offline validation only; no live equivalence to historical TQ-02R claimed",
+  "phase_2b_2_sha256": {
+    "safe_qwen_worker.py": "7fb0d082c1fe3a93a200b6168d54421daad42ceb77d39d1f3ab2fff9e91bd26f",
+    "tool_protocol.py": "489b8c238ea335508d3647a7fd9eba1b17acf8f68e346ff19e43b0c3ba318c2a",
+    "integration_shim.py": "b94a92f2634c08817b02b25457c2d817388753d313c5c37b03b419ffe9be46df",
+    "safe_executor_binding.py": "4c9b44226a7bf29a5a33f4b6ba9422055898f6f970348cddc61a8c8fe790a434",
+    "terminal_run.py": "a16adfe28234c075b6e13f1fa2e7c4e18583a17f31b8004d036fec15d65b3964"
+  },
+  "phase_2b_2_scope": "Policy contract and expert identity only; native HotPin reviewer dispatch blocked; no live qualification."
 }

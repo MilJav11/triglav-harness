@@ -681,6 +681,9 @@ class Gateway:
             return self._switch(role)
 
     def _switch(self, role: str):
+        if self.config.get("executor") == "safe_qwen" and role == "review":
+            from safe_executor_binding import require_reviewer_enforcement
+            require_reviewer_enforcement(self.config, role)
         if self.active_role == role:
             current = self.running()
             if any(isinstance(item, dict) and item.get("model") == self.config["roles"][role]

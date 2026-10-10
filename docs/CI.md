@@ -22,7 +22,9 @@ limited to the ephemeral GitHub runner; no local model/gateway/CLI is installed.
 - Eight executor-protocol tests and fourteen planner-protocol tests.
 - Thirty-nine reviewed SafeQwen development/worker tests, with scripted responses.
 - Forty SafeQwen integration/ownership/recovery tests and eight selected
-  existing final-verification/checkpoint regressions, plus ten milestone timeout regressions: 129 cases in total.
+  existing final-verification/checkpoint regressions, plus ten milestone timeout regressions: 129 original cases.
+- Twenty-six HotPin policy contract, expert identity, resume, compatibility and
+  blocked-dispatch regressions using disposable fake assets: 155 cases in total.
 - Import and capture CLI --help and SafeQwen dry-run output.
 
 The protocol tests use mocked or scripted model replies. Planner correction cases

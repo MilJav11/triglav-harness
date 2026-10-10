@@ -47,7 +47,7 @@ def read_policy(path):
 
 
 def configure_worker(config, repository, data, config_path, *, critic=False, reviewer=False):
-    from safe_executor_binding import identity, validate_config
+    from safe_executor_binding import configure_reviewer_policy, identity, validate_config
     cfg = copy.deepcopy(config)
     validate_config(cfg)
     if reviewer and not critic:
@@ -57,6 +57,7 @@ def configure_worker(config, repository, data, config_path, *, critic=False, rev
     if type(resources) is not dict or set(resources) != active:
         raise ValueError("Declare runtime files for exactly the enabled roles")
     base = Path(config_path).resolve().parent
+    configure_reviewer_policy(cfg, base)
     for role, files in resources.items():
         if role not in cfg["roles"] or type(files) is not dict or set(files) != {"binary", "model", "gateway_config"}:
             raise ValueError("Each enabled role requires binary, model and gateway_config identities")
@@ -166,9 +167,15 @@ def cli(args, root, config):
                          "reviewer": "enabled" if args.reviewer else "disabled",
                          "acceptance": "controller checkpoint after critic, reviewer and fresh final verification"
                          if args.critic and args.reviewer else "intermediate only; no trusted checkpoint"}
+    if "safe_qwen_reviewer_policy" in cfg:
+        summary["reviewer_resource_policy"] = {
+            **cfg["safe_qwen_reviewer_policy"], "native_enforcement": "not_implemented",
+            "dispatch": "blocked"}
     if args.dry_run:
         return {**summary, "executor": "safe_qwen", "safe_qwen_identity": cfg["safe_qwen_identity"],
                 "verification_timeout_seconds": verification_timeout(cfg)}
+    from safe_executor_binding import require_reviewer_enforcement
+    require_reviewer_enforcement(cfg)
     runs = root / "runs"
     store = Store(runs, manager.datetime_id())
     with exclusive_lock(runs / ".durable-controller.lock"):
@@ -184,6 +191,8 @@ def execute_bound(store, worker, *, progress=False):
     import manager
     from durable import DurableError
     from supervision import Supervisor
+    from safe_executor_binding import require_reviewer_enforcement
+    require_reviewer_enforcement(store.state["options"]["config"])
     result = manager.execute(store, agents=agents_factory(worker), progress=progress)
     if result.get("stop", {}).get("cleanup") != "passed":
         raise DurableError("SafeQwen controller cleanup unproven; inspect retained state before continuing")

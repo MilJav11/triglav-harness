@@ -140,6 +140,11 @@ See [SafeQwen exit codes, recovery and boundaries](SAFEQWEN.md#actual-cli).
 
 ## Phase 2B integration seam
 
+Phase 2B.2 adds the [closed reviewer policy contract](HOTPIN_POLICY.md), expert
+content identity and deliberate launch blocks. Native enforcement below remains
+unimplemented; the three-model template needs the policy for review dry-run and
+cannot run live in this slice. The numbered gaps describe the Phase 2A baseline.
+
 The missing seam is **explicit SafeQwen reviewer resource-policy binding**:
 
 1. `terminal_run.configure_worker` rejects nonempty `review_profiles`.

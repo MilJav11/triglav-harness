@@ -45,10 +45,13 @@ checkpoint. Worker submit and zero exit remain untrusted.
 See [portable Windows setup](WINDOWS_SETUP.md) for acquisition links and the
 [three-role JSON](../config/safeqwen-three-model.example.json) /
 [dedicated gateway YAML](../config/llama-swap.safeqwen.example.yaml) examples.
-These are preflight templates, not a qualified live deployment: profile-free
-SafeQwen cannot currently verify HotPin inheritance or enforce the recorded
-32 GiB reviewer ceiling. The [Phase 2B seam](WINDOWS_SETUP.md#phase-2b-integration-seam)
-requires production code changes; adding roles alone does not close it.
+These templates are not a qualified live deployment. The
+[Phase 2B.2 policy contract](HOTPIN_POLICY.md) adds expert-file validation and
+identity binding, but **live SafeQwen HotPin dispatch is blocked** pending native
+inheritance/cap enforcement. The three-model example declares HotPin and now
+requires the explicit policy even for review dry-run; its configuration has not
+been activated or rewritten. Adding roles alone does not close the
+[remaining native seam](WINDOWS_SETUP.md#phase-2b-integration-seam).
 
 Use Python 3.11+, Git, a committed TRIGLAV checkout, and a separate clean committed
 Git target repository with trusted tests. The new Python modules use only the
