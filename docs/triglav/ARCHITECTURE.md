@@ -5,7 +5,9 @@ PUBLIC PREVIEW — Phase 4 AS-IS baseline, 9 October 2026. Production HEAD: `c96
 This page describes the **historical external route**. The
 [current Phase 8A integration](../SAFEQWEN.md) replaces host-specific launch
 assumptions/global hooks with configurable runtime ownership and direct binding;
-it has offline validation only and is not claimed equivalent.
+it has guarded offline validation and later passed one privately provisioned
+[Phase 8B Stage 2 fixture](QUALIFICATION.md#phase-8b-stage-2). It is not claimed
+equivalent to the historical route or reproducible as a full chain from a clone.
 
 ## Component responsibilities
 

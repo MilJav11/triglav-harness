@@ -1,13 +1,15 @@
 # TRIGLAV roadmap
 
-These are proposals, not implemented guarantees or authorization to execute models.
-The real controller and tests remain the current code baseline.
+Phase 8B Stage 2 completed successfully for one privately provisioned bounded
+fixture; see [qualification scope](QUALIFICATION.md#phase-8b-stage-2).
+The remaining items below are proposals, not implemented guarantees or
+authorization to execute models. Clone readiness remains PARTIAL.
 
 | Priority | Work | Evidence required |
 |---|---|---|
 | 1 | Maintain independent brand provenance and license boundaries | Owner approval recorded; retain the MIT/software and separate brand scope |
 | 2 | Clear public setup and validated dependency versions | Fresh committed checkout, reviewed configuration and separate host validation |
-| 3 | SafeQwen live requalification (Phase 8B) | Phase 8A supplies explicit binding/configuration and offline tests; fresh live qualification remains required |
+| 3 | Publicly reproducible SafeQwen deployment and broader qualification | Phase 8B Stage 2 passed one bounded fixture; private tooling/runtime assets still prevent clean-clone full-chain reproduction |
 | 4 | Consistent Manager criteria/reporting | Separate implementation review preserving the historical discrepancy |
 | 5 | Direct cleanup accountability | Failure-path tests and independent process-exit evidence |
 | 6 | Stronger semantic oracles | Frozen boundary/adversarial cases preserving the false-trust counterexample |

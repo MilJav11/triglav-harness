@@ -4,6 +4,8 @@ PUBLIC PREVIEW. This is an editorial summary inherited from the private project'
 reviewed documentation. Raw evidence, private run identifiers, Store references,
 fixture commits, private runtime pins and machine paths are intentionally omitted.
 Those records were not accessed or replayed during the clean export audit.
+This update additionally summarizes the verified Phase 8B Stage 2 final report;
+no raw private record is imported and no model qualification is replayed.
 
 ## Evidence interpretation
 
@@ -12,6 +14,13 @@ work have different scope. A recorded result is not a reproduction package.
 The controller and tests are present. Phase 8A adds a
 [reviewed SafeQwen migration](../SAFEQWEN.md) with [separate source hashes](../SAFEQWEN_SOURCE.md);
 its offline validation does not reproduce the historical deployment.
+The public HEAD `1a3167830f8d1fdf79dba255346784f57793a3ce` passed 129/129
+guarded offline cases. [Phase 8B Stage 2](QUALIFICATION.md#phase-8b-stage-2)
+then passed one bounded three-model fixture using private operator tooling and
+local runtimes: 8 FAIL / 4 PASS → 12/12 PASS, CRITIC_FINDINGS with one retained
+MINOR finding, REVIEWER_APPROVED / APPROVE, fresh final verifier PASS and a
+validated checkpoint. Sequential unloads and the 32 GiB HotPin cap were verified.
+This adds no clean-clone reproduction or general autonomous coding claim.
 
 | Historical case | Reported outcome |
 |---|---|
@@ -34,12 +43,14 @@ was GPT-OSS-120B through HotPin.
 Controller configuration and effective deadlines must be distinguished.
 The source's general reviewer request ceiling differs from its nested reviewer
 setting; a setting name alone is not an enforced limit. Current hardware,
-latency and thermal behavior were not measured.
+latency and thermal behavior were not measured by the export audit. Stage 2
+resource/lifecycle evidence is specific to its privately provisioned deployment.
 
 ## Reporting and semantic limits
 
 ALL_CRITERIA_PROVEN appears at the top level while nested AC1–AC3 remain NOT_PROVEN
-and completion is null. The distinct WorkUnit/legacy report paths explain the
+and completion is null in historical TQ-02R. Stage 2 retains the corresponding
+AC1 NOT_PROVEN / completion null discrepancy. The distinct WorkUnit/legacy report paths explain the
 representation mismatch; this export does not fix it.
 QUAL-004 retained a false-trust outcome despite passing tests and reviews.
 Approval and evidence hashes cannot prove all application semantics.

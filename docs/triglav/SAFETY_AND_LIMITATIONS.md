@@ -8,7 +8,9 @@ Claim IDs resolve in the [public evidence summary](EVIDENCE_SUMMARY.md#claim-map
 
 This historical policy description remains relevant background. See
 [current SafeQwen permissions, ownership and recovery limits](../SAFEQWEN.md#tool-permissions-and-residual-risks)
-for the Phase 8A migration, which replaces global hooks but has no live qualification.
+for the Phase 8A migration, which replaces global hooks. Later
+[Phase 8B Stage 2](QUALIFICATION.md#phase-8b-stage-2) qualified one bounded fixture
+on a privately provisioned deployment; the open safety limitations below remain.
 
 ## Exact SafeQwen tool policy
 

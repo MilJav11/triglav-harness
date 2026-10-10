@@ -2,7 +2,11 @@
 
 Use native Windows, Python 3.11+, Git and PowerShell. Run commands from the
 repository root. This is configuration guidance, not proof that the public
-snapshot reproduces a qualified host.
+snapshot reproduces a qualified host. [Phase 8B Stage 2](docs/triglav/QUALIFICATION.md#phase-8b-stage-2)
+passed on a privately provisioned deployment; clone readiness remains PARTIAL.
+For model-free help and the 129-case guarded check, use the
+[source-only Quick Start](README.md#quick-start). See the
+[documentation index](docs/triglav/README.md) for storage and missing assets.
 
 ## Provision external dependencies
 
@@ -99,7 +103,9 @@ python harness.py autonomous-run --repo '.\target-repo' --task 'Fix the calculat
 
 OpenCode is opt-in through --executor opencode. Its candidate output remains subject
 to controller scope, verifier, review and checkpoint gates. Cline is a retained
-WorkUnit adapter; no SafeQwen launcher or worker is included.
+WorkUnit adapter. The opt-in SafeQwen worker, fixed-WorkUnit launcher and direct
+identity adapter are included; see [setup, CLI and limits](docs/SAFEQWEN.md).
+The private Stage 2 operator/watchdog tooling and deployment assets are not included.
 See [executor boundaries](OPENCODE_BOUNDARY.md).
 
 ## Stop and inspect
@@ -110,7 +116,8 @@ See [executor boundaries](OPENCODE_BOUNDARY.md).
 
 Inspect locally generated logs and the exact owned process state. Keep logs,
 model outputs, configurations and evidence private unless independently reviewed.
-No original local run evidence or historic process measurement is included here.
+Only sanitized qualification summaries are included; original run evidence,
+Store archives and process telemetry remain private.
 
 For offline checks, see [VALIDATION.md](VALIDATION.md). Do not treat smoke or
 measurement scripts as model-free unit tests.

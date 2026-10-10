@@ -55,6 +55,11 @@ Runtime settings, source layout, ownership resolution and recovery behavior have
 changed. **These migrated sources are not asserted equivalent to the historically
 qualified source set.** Historical TQ-02R reported 32 frozen tests and
 `CHAIN_ACCEPTED_AWAITING_HUMAN_AUDIT`; the top-level `ALL_CRITERIA_PROVEN` versus
-nested AC1Ă˘â‚¬â€śAC3 `NOT_PROVEN` discrepancy remains unresolved. The private originals
-and qualification evidence remain untouched. See [integration and Phase 8B
-requirements](SAFEQWEN.md) and [qualification scope](triglav/QUALIFICATION.md).
+nested AC1–AC3 `NOT_PROVEN` / completion null discrepancy remains unresolved.
+The private originals and qualification evidence remain untouched.
+
+Phase 8B Stage 2 subsequently qualified one bounded fixture at public HEAD
+`1a3167830f8d1fdf79dba255346784f57793a3ce`, with private operator tooling and
+locally provisioned runtimes. That result does not make this hash table a runtime
+manifest or public reproduction package. See [integration status](SAFEQWEN.md#phase-8b-result-and-remaining-validation)
+and [qualification scope](triglav/QUALIFICATION.md#phase-8b-stage-2).

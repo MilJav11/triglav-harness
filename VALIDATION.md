@@ -120,3 +120,25 @@ WorkUnit-versus-legacy criterion reporting remains unchanged. Source/configurati
 runtime, policy and actual executor identity gates fail closed. This is offline
 integration validation only, not equivalence, live requalification or public-clone
 TQ-02R qualification. Phase 8B requires separate owner-authorized live validation.
+
+## Verified readiness and Phase 8B Stage 2
+
+The later readiness assessment verified public HEAD
+`1a3167830f8d1fdf79dba255346784f57793a3ce`, 111 tracked files and **129/129**
+guarded offline CI cases passed. The current selection adds ten milestone verifier
+timeout regressions to the historical 119-case Phase 8A selection; see
+[current CI scope](docs/CI.md). Historical counts above remain historical results.
+
+Phase 8B Stage 2 completed successfully on 10 October 2026: one bounded fixture,
+8 FAIL / 4 PASS → 12/12 PASS, Nemotron CRITIC_FINDINGS with one preserved MINOR
+finding, GPT-OSS REVIEWER_APPROVED / APPROVE, fresh final verifier PASS and a
+validated trusted checkpoint. Sequential unloading and the owned HotPin reviewer's
+32 GiB cap were verified. AC1 NOT_PROVEN / completion null remains recorded.
+See the [qualification summary](docs/triglav/QUALIFICATION.md#phase-8b-stage-2).
+
+This later live qualification supersedes the earlier pending Phase 8B status;
+the earlier export/migration checks did not themselves run models. The qualified
+deployment still depends on private operator tooling and locally provisioned
+model runtimes. **CLONE_READINESS: PARTIAL.** No full-chain clean-clone
+reproduction or general autonomous coding qualification is claimed. This
+documentation patch runs no models and changes no source, tests or configuration.

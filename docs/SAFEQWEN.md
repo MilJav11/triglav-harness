@@ -1,9 +1,13 @@
-# SafeQwen public integration (Phase 8A)
+# SafeQwen public integration (Phase 8A / Phase 8B status)
 
-Experimental, explicitly selected integration on native Windows, with offline
-validation only. This migrated code has **not** undergone live qualification.
-Cloning TRIGLAV does not reproduce historical TQ-02R. No model weights, gateway,
-native binaries or retained qualification fixture/evidence are included.
+Experimental, explicitly selected integration on native Windows. The public
+source passed 129/129 guarded offline cases; **Phase 8B Stage 2 completed
+successfully** on one bounded fixture using private operator tooling and locally
+provisioned runtimes. See the [qualification summary](triglav/QUALIFICATION.md#phase-8b-stage-2).
+Clone readiness remains **PARTIAL**: neither that full deployment nor historical
+TQ-02R is reproduced by cloning. No model weights, gateway, native binaries,
+private operator helpers or retained qualification fixture/Store are included.
+See the [missing integration assets](triglav/README.md#dependencies-and-missing-integration-assets).
 
 ## Components and authority
 
@@ -82,11 +86,11 @@ remote OpenAI service adapter. No automatic gateway startup is provided.
    parent lineage and delegated child identity before authorizing lifecycle work.
    Unsupported command formats or ownership ambiguity fail closed. Operator
    declarations are not independent proof that a live gateway loaded those bytes;
-   verify actual deployment in Phase 8B. Gateway configuration containing secrets
+   verify each new deployment independently. Phase 8B validates only its recorded host. Gateway configuration containing secrets
    should stay outside the repository. Never publish local runtime logs/evidence.
 5. Implicit `review_profiles`/HotPin template deployment is unsupported for this
-   route and refused. Provision explicit role commands instead; their live
-   compatibility remains unqualified. Use operator configuration without the
+   route and refused. Provision explicit role commands instead; only the explicit private Stage 2 deployment was live-qualified;
+   arbitrary operator configurations remain unqualified. Use operator configuration without the
    inherited machine-specific startup templates.
 
 ## Actual CLI
@@ -116,13 +120,14 @@ Read-only mode requires empty writable policy, `--allow` equal to readable files
 and no `--forbid`: its entire readable set is internally frozen, and the existing
 read-only scheduler forbids candidate mutation.
 
-Removing `--dry-run` is an explicit **live model invocation**; do that only under
-separate Phase 8B authorization. The code-only example returns an intermediate
+Removing `--dry-run` is an explicit **live model invocation**; provision and
+review your own deployment before doing so. The code-only example returns an intermediate
 READY result (CLI exit 2), not acceptance. For the full gated path, add runtime
 resources for `critic` and `review`, place global `--critic` before
 `autonomous-run`, and add `--reviewer --review-policy three-model`. Exit 0 means
 COMPLETED or validated dry-run; exit 1 means stopped/error; exit 2 is a
-non-completed result. This phase executed no such live invocation.
+non-completed result. Phase 8B used separately provisioned private operator
+tooling; this example is setup guidance, not the qualified invocation.
 
 Inspect with `python -B harness.py status --run-id <operator-run-id> --json`.
 Resume through `python -B harness.py autonomous-resume --run-id <operator-run-id>`;
@@ -163,8 +168,9 @@ Verification is controller-owned and executes repository tests/edited Python.
 Trusted tests are required: model-written source can execute during verification,
 and offline CI guards are scoped to reviewed disposable fixtures. They do not
 contain arbitrary malicious repositories or all child behavior. Windows broker
-Job Objects preserve their existing bounded ownership rules; native crash/cancel
-windows, actual model cleanup and hardware limits require Phase 8B review.
+Job Objects preserve their existing bounded ownership rules. Stage 2 verified
+sequential model unloading and the 32 GiB HotPin cap on its deployment; broader
+native crash/cancel windows, cleanup failures and other hardware remain unqualified.
 
 ## Offline checks and historical scope
 
@@ -197,15 +203,19 @@ unresolved and disclosed. This offline migrated-code validation does not reprodu
 that external deployment, establish equivalence, or constitute public-clone
 qualification. See [historical qualification](triglav/QUALIFICATION.md).
 
-## Phase 8B requirements
+## Phase 8B result and remaining validation
 
-Owner-authorized live tests must verify the actual model/gateway/runtime versions,
-licensed artifacts and declared command/parent identity, resource/RAM/deadline
-settings, worker operations and scope, actual critic/reviewer policy, fresh final
-verification, trusted checkpoint, unchanged completed reuse, interruption and
-cleanup behavior. Use a new disposable fixture/run and independent frozen oracle;
-never repair/reuse retained qualification evidence. Record new source/runtime pins
-and separate human semantic review. Examine the remaining report discrepancy,
-intermediate recovery limitation, filesystem races and failure/cleanup diagnostics.
-No production, equivalence, host-sandbox or blanket autonomy guarantee follows
-from Phase 8A.
+The completed Stage 2 chain recorded Qwen's 8 FAIL / 4 PASS baseline becoming
+12/12 PASS, Nemotron `CRITIC_FINDINGS` with one retained MINOR finding, GPT-OSS
+`REVIEWER_APPROVED` / `APPROVE`, a fresh final verifier PASS and a validated trusted
+checkpoint. Sequential unloads and the owned HotPin reviewer's 32 GiB hard maximum
+were verified. Manager AC1 `NOT_PROVEN` / completion null remains unchanged.
+See the [concise qualification record](triglav/QUALIFICATION.md#phase-8b-stage-2).
+
+This establishes one bounded fixture qualification, not equivalence to TQ-02R,
+clean-clone reproduction, host isolation or general autonomous coding. New hosts,
+runtime versions, policies and resource settings require their own validation.
+Broader interruption/recovery, concurrent filesystem races, failure/cleanup paths
+and human semantic review remain separate concerns. Preserve historical verdicts
+and evidence; use fresh disposable fixtures and independent frozen oracles for
+new qualification.

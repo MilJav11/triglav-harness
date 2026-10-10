@@ -31,11 +31,20 @@ one supervised task; `long-run`, `resume` and `status` provide durable state.
 `autonomous-run` and `autonomous-resume` expose a bounded ManagerLoop with
 WorkUnit contracts, planning and scheduling.
 
-**SafeQwen boundary:** an explicitly selected [public migration](docs/SAFEQWEN.md)
-now includes the worker, fixed-WorkUnit launcher and identity adapter, with offline
-validation only. TQ-02R remains historical external qualification evidence.
-**Cloning this repository does not reproduce TQ-02R.** Its reported 32-test result
-covers one bounded fixture, not production certification of this public snapshot.
+**Verified Phase 8B source baseline:** public commit
+`1a3167830f8d1fdf79dba255346784f57793a3ce` contains 111 tracked files and passed
+**129/129 guarded offline CI tests**. The opt-in [SafeQwen integration](docs/SAFEQWEN.md)
+includes a closed-tool worker, fixed-WorkUnit launcher and direct identity adapter.
+**Phase 8B Stage 2 qualification completed successfully** on one bounded fixture:
+Qwen execution, Nemotron findings, GPT-OSS approval, fresh final verification and
+a validated trusted checkpoint. See the [qualification summary](docs/triglav/QUALIFICATION.md#phase-8b-stage-2).
+
+**Clone readiness: PARTIAL.** Public source functionality and offline checks are
+available; the qualified deployment additionally used private operator tooling
+and locally provisioned model runtimes. A clean clone does not reproduce that
+full chain or historical TQ-02R. This is not general autonomous coding or
+production certification. The [documentation index](docs/triglav/README.md)
+lists storage locations, Git exclusions and missing reproduction assets.
 
 ## Architecture
 
@@ -69,51 +78,30 @@ See [architecture](ARCHITECTURE.md) and [executor boundaries](OPENCODE_BOUNDARY.
 
 ## Quick Start
 
-**Prerequisites:** native Windows, Python 3.11+, Git and PowerShell on PATH.
-For model execution, provision a dedicated loopback llama-swap gateway, compatible
-local model servers and model weights separately. Optional executor CLIs also
-need separate installation. Review their licenses and RAM/VRAM requirements;
-the historical large reviewer is resource intensive.
-
-The controller uses the Python standard library. [requirements-dev.txt](requirements-dev.txt)
-lists pytest for development; the offline CI checks below use unittest.
-No dependency, gateway, binary, model or third-party CLI is installed automatically.
+This is a **source-only** start on native Windows with Python 3.11+, Git and
+PowerShell on PATH. The controller uses the Python standard library;
+[requirements-dev.txt](requirements-dev.txt) lists pytest for development, while
+the guarded CI entry point uses unittest. No model or gateway is needed below.
 
 ```powershell
 git clone https://github.com/MilJav11/triglav-harness.git
 cd triglav-harness
 python -B harness.py --help
+python -B scripts/ci_offline.py
 ```
 
-Help is offline. Before running a task:
+Help is offline. The reviewed CI command parses Python, checks CLI/dry-run
+behavior and runs scripted model responses with disposable fixtures. It does
+not install dependencies, start a gateway or run models. It executes trusted
+fixture code and Git/Python subprocesses; use the committed checkout.
 
-1. Read [configuration and startup](RUNBOOK.md) and provision the external runtimes.
-2. Adapt [config/llama-swap.yaml](config/llama-swap.yaml) and
-   [config/harness.json](config/harness.json) to your executables, model files and
-   reviewer expert files. Generic absolute defaults are examples, not portable discovery.
-3. Prepare a disposable, clean target Git repository with an initial commit and
-   trusted code/tests. Durable identity also requires a committed controller checkout.
-
-**The following commands contact/start the gateway; smoke performs real inference.**
-Run them only after provisioning and reviewing your configuration:
-
-```powershell
-.\scripts\start-swap.ps1
-python harness.py health
-python harness.py smoke --role code
-python harness.py run --repo '.\target-repo' --task 'Fix the requested behavior' --verify 'python -m unittest discover -v'
-```
-
-Add `--reviewer` to the run command for senior review. Advisory `--critic` is a
-global flag used with compatible reviewer policy. Repeat `--verify` for independent
-checks. Candidate edits remain available for inspection; the controller does not
-commit or push them. OpenCode is selected with `autonomous-run --executor opencode`;
-its exit status cannot bypass controller verification or scope checks.
-
-The optional `autonomous-run --executor safe_qwen --safeqwen-policy ...` route uses
-an operator-authored fixed WorkUnit and preserves deterministic/controller authority.
-See [SafeQwen setup, CLI and limits](docs/SAFEQWEN.md); runtime files must be provisioned
-separately. No live requalification or equivalence to TQ-02R is claimed.
+For live use, first read the [runbook](RUNBOOK.md) and
+[SafeQwen setup and limits](docs/SAFEQWEN.md). Provision compatible llama-swap,
+model servers, weights and any optional executor CLIs separately, then adapt the
+configuration examples. The supplied absolute defaults are installation examples,
+not runtime discovery. The privately qualified tooling, deployment configuration
+and frozen fixture are not a public reproduction package; see
+[dependencies and missing integration assets](docs/triglav/README.md#dependencies-and-missing-integration-assets).
 
 ## Verification
 
@@ -125,7 +113,8 @@ python -B scripts/ci_offline.py
 
 [Offline CI](docs/CI.md) parses all Python source, runs **8 executor-protocol,
 14 planner-protocol and 10 guard tests**, plus **39 SafeQwen worker, 40 integration
-and 8 selected final-verification/checkpoint regressions** (119 total), and captures CLI help. Model replies are
+and 8 selected final-verification/checkpoint regressions**, plus **10 milestone
+verifier timeout regressions** (**129 total**), and captures CLI help. Model replies are
 mocked/scripted. Planner cases use disposable Git fixtures and the real Python
 supervision broker; network/process/Gateway guards constrain the reviewed checks.
 Controller identity uses actual Git HEAD, without the earlier export audit's shim.
@@ -137,9 +126,10 @@ is not full test coverage. Do not run the entire suite or smoke scripts blindly:
 retained tests include native process, local HTTP server and optional CLI cases.
 
 [Public validation history](VALIDATION.md) describes earlier executed/skipped work.
-Historical live qualification has not been rerun by these offline checks.
-The Manager reporting discrepancy—**ALL_CRITERIA_PROVEN versus nested AC1–AC3
-NOT_PROVEN**—remains disclosed in [qualification limits](docs/triglav/QUALIFICATION.md).
+Offline CI does not rerun live qualification. The completed Phase 8B Stage 2
+result is documented separately. The Manager reporting discrepancy remains:
+**ALL_CRITERIA_PROVEN versus nested AC1 NOT_PROVEN / completion null** in Stage 2
+(and AC1–AC3 in historical TQ-02R). See [qualification limits](docs/triglav/QUALIFICATION.md#reporting-discrepancy).
 Model reviews and hashes do not establish semantic correctness.
 
 ## Safety
@@ -160,8 +150,9 @@ and the [recovery protocol](CONVERGENCE.md).
 
 ## Roadmap
 
-SafeQwen live requalification (Phase 8B), Aider evaluation, smaller reviewers, host isolation
-and broader multi-project autonomy remain proposed work. No experimental terminal
+Phase 8B Stage 2 is complete for one privately provisioned bounded fixture.
+Public deployment reproducibility, Aider evaluation, smaller reviewers, host
+isolation and broader multi-project autonomy remain proposed work. No experimental terminal
 banner is shipped. See the [roadmap](docs/triglav/ROADMAP.md) and
 [public documentation](docs/triglav/README.md) for scope and evidence.
 
