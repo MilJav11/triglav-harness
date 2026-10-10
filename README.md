@@ -11,6 +11,7 @@
   <img src="https://img.shields.io/badge/Platform-Windows-0078D4" alt="Native Windows">
   <a href="LICENSE"><img src="https://img.shields.io/badge/Software_license-MIT-2EA44F" alt="Eligible original software: MIT"></a>
   <img src="https://img.shields.io/badge/Status-Experimental_Public_Preview-D97706" alt="Experimental Public Preview">
+  <a href="https://github.com/MilJav11/triglav-harness/actions/workflows/offline-ci.yml"><img src="https://github.com/MilJav11/triglav-harness/actions/workflows/offline-ci.yml/badge.svg?branch=main&amp;event=push" alt="Offline CI: Windows / Python 3.11"></a>
 </p>
 
 <p align="center">
