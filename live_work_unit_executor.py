@@ -30,7 +30,7 @@ from manager import ExecutorError
 
 # --------------------------------------------------------------------------- constants
 
-DEFAULT_CLINE_EXECUTOR = r"C:\AI\tools\cline-cli-3.0.68\package\bin\cline.exe"
+DEFAULT_CLINE_EXECUTOR = str(Path(__file__).resolve().parent / "runtime" / "cline" / "cline.exe")
 DEFAULT_MODEL = "llm-code"
 DEFAULT_PROVIDER = "local-qwen"
 DEFAULT_BASE_URL = "http://127.0.0.1:9292/v1"

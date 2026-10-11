@@ -7,11 +7,12 @@ from the historical external SafeQwen deployment. The controller, tests and
 configuration templates are included. Local models, gateways, binaries and
 third-party CLIs must be provisioned separately.
 
-The [SafeQwen integration](../SAFEQWEN.md) passed 129/129 guarded offline cases.
-[Phase 8B Stage 2](QUALIFICATION.md#phase-8b-stage-2) completed one bounded
-three-model fixture qualification on a privately provisioned deployment.
-Clone readiness is **PARTIAL**; cloning does not reproduce that full chain or
-historical TQ-02R. Neither result establishes general autonomous coding.
+The [SafeQwen integration](../SAFEQWEN.md) has 209 guarded offline cases.
+[Public Run 003](QUALIFICATION.md#public-run-003) qualified one bounded public
+three-model WorkUnit with a validated trusted checkpoint and native safety gates.
+Use the [portable Windows demo](../WINDOWS_SETUP.md) and public frozen fixture;
+models/runtimes remain external prerequisites. Historical Stage 2/TQ-02R are
+separate records; neither result establishes sustained long-horizon autonomy.
 
 - [Current SafeQwen integration and CLI](../SAFEQWEN.md)
 - [Original/migrated SafeQwen source identities](../SAFEQWEN_SOURCE.md)
@@ -79,6 +80,6 @@ and sanitized qualification summaries are tracked.
 | Sanitized Phase 8B Stage 2 qualification summary | Private operator/watchdog, broker, heartbeat, lifecycle/resource-check helpers, frozen qualification fixture/oracle, deployment manifests, session telemetry and Store evidence |
 
 The private integration assets are not a public setup kit. Source-only checks
-are reproducible within their documented Windows scope; full-chain clean-clone
-reproduction remains unproven. New deployment validation and broader fixture,
+are reproducible within their documented Windows scope; the proposed source snapshot is audited separately from any published remote.
+Live asset provisioning and each new host remain operator responsibilities. New deployment validation and broader fixture,
 failure-path and autonomy qualification remain [roadmap work](ROADMAP.md).

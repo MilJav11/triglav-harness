@@ -34,6 +34,187 @@ def digest(value):
 LOADED = {name: file_sha(path) for name, path in SOURCES.items()}
 
 
+def validate_reviewer_policy(cfg):
+    """Closed v1 contract; metadata detects declared HotPin, never proves a runtime."""
+    resources = cfg.get("safe_qwen_runtime", {})
+    review_enabled = type(resources) is dict and "review" in resources
+    alias = cfg.get("roles", {}).get("review")
+    metadata = cfg.get("model_metadata", {})
+    metadata = metadata.get(alias, {}) if type(metadata) is dict else {}
+    runtime = metadata.get("runtime") if type(metadata) is dict else None
+    declared_hotpin = type(runtime) is str and runtime.strip().casefold() == "hotpin"
+    if "safe_qwen_reviewer_policy" not in cfg:
+        if review_enabled and declared_hotpin:
+            raise ValueError("SafeQwen HotPin reviewer requires an explicit resource policy")
+        return None
+    policy = cfg["safe_qwen_reviewer_policy"]
+    fields = {"version", "type", "hot_experts", "hot_experts_sha256",
+              "min_available_ram_gb", "max_working_set_gb"}
+    if type(policy) is not dict or set(policy) != fields:
+        raise ValueError("Unsupported SafeQwen reviewer resource-policy fields")
+    if not review_enabled:
+        raise ValueError("SafeQwen reviewer resource policy requires an enabled review runtime")
+    if type(policy["version"]) is not int or policy["version"] != 1:
+        raise ValueError("Unsupported SafeQwen reviewer resource-policy version")
+    if type(policy["type"]) is not str or policy["type"] != "hotpin":
+        raise ValueError("Unsupported SafeQwen reviewer resource-policy type")
+    for key, expected in (("min_available_ram_gb", 44), ("max_working_set_gb", 32)):
+        if type(policy[key]) is not int or policy[key] != expected:
+            raise ValueError("SafeQwen HotPin v1 requires 44 GiB free RAM and a 32 GiB hard maximum")
+    name = policy["hot_experts"]
+    if (type(name) is not str or not name.strip() or "\0" in name
+            or name.startswith(("\\\\", "//"))):
+        raise ValueError("SafeQwen HotPin expert asset must be a local file")
+    path = Path(name)
+    if path.drive and not path.is_absolute():
+        raise ValueError("SafeQwen HotPin expert asset cannot be drive-relative")
+    expected = policy["hot_experts_sha256"]
+    if type(expected) is not str or re.fullmatch(r"[0-9a-f]{64}", expected) is None:
+        raise ValueError("SafeQwen HotPin requires a trusted lowercase SHA-256")
+    if cfg.get("review_profile") or cfg.get("review_profiles"):
+        raise ValueError("SafeQwen HotPin resource policy cannot select legacy profiles")
+    aliases = list(cfg.get("roles", {}).values())
+    if len(aliases) != len(set(aliases)):
+        raise ValueError("SafeQwen HotPin requires distinct model aliases for each role")
+    return policy
+
+
+def reviewer_expert_identity(cfg):
+    """Verify actual expert bytes against the operator's trusted expected digest."""
+    from environment import file_identity
+    policy = validate_reviewer_policy(cfg)
+    if policy is None:
+        return None
+    path = Path(policy["hot_experts"])
+    if not path.is_absolute():
+        raise ValueError("SafeQwen HotPin expert path must be resolved against operator configuration")
+    try:
+        resolved = path.resolve(strict=True)
+    except OSError as exc:
+        raise ValueError("SafeQwen HotPin expert asset is missing or unavailable") from exc
+    if str(resolved).startswith(("\\\\", "//")):
+        raise ValueError("SafeQwen HotPin expert asset must resolve to a local file")
+    value = file_identity(resolved)
+    if "error" in value:
+        raise ValueError("SafeQwen HotPin expert asset is unavailable or changed during read")
+    if value["sha256"] != policy["hot_experts_sha256"]:
+        raise ValueError("SafeQwen HotPin expert SHA-256 mismatch")
+    return value
+
+
+def configure_reviewer_policy(cfg, base):
+    policy = validate_reviewer_policy(cfg)
+    if policy is not None:
+        path = Path(policy["hot_experts"])
+        cfg["safe_qwen_reviewer_policy"] = {**policy, "hot_experts": str(
+            (path if path.is_absolute() else base / path).resolve())}
+        reviewer_expert_identity(cfg)
+
+
+def require_reviewer_enforcement(cfg, role=None):
+    """Preflight native support and bound expert bytes; live ownership is checked at dispatch."""
+    if role not in (None, "review"):
+        return
+    if validate_reviewer_policy(cfg) is not None:
+        import ctypes
+        if os.name != "nt" or ctypes.sizeof(ctypes.c_void_p) != 8:
+            raise RuntimeError("SafeQwen HotPin enforcement requires native x64 Windows Python")
+        reviewer_expert_identity(cfg)
+
+
+def is_safe_qwen_config(cfg):
+    return type(cfg) is dict and (cfg.get("executor") == "safe_qwen" or any(
+        key in cfg for key in ("safe_qwen_identity", "safe_qwen_runtime", "safe_qwen_reviewer_policy")))
+
+
+def gateway_config(gateway):
+    """Use Store provenance as well as the executor key; reject divergent live routing."""
+    from durable import DurableError
+    supervisor = gateway.supervisor
+    state = getattr(getattr(supervisor, "store", None), "state", {})
+    options = state.get("options", {})
+    owned = options.get("config")
+    recorded = options.get("work_unit_executor", {}).get("kind")
+    if not (is_safe_qwen_config(gateway.config) or is_safe_qwen_config(owned) or recorded == "safe_qwen"):
+        return None
+    if supervisor is None or owned is None or gateway.config != owned:
+        raise DurableError("SafeQwen Gateway differs from the pinned Store configuration")
+    validate_pinned(owned)
+    return owned
+
+
+def reviewer_owned_child(gateway, cfg, running, processes):
+    """Observe without granting cleanup authority; retain the exact launch child binding."""
+    from durable import DurableError
+    supervisor = gateway.supervisor
+    children = supervisor.reconcile()
+    supervisor.require_no_ambiguous_model(children)
+    active = [c for c in children if c["purpose"] == "model_server"
+              and c["state"] in {"STARTING", "UNKNOWN", "RUNNING", "STOPPING"}]
+    if (len(active) != 1 or active[0]["state"] != "RUNNING"
+            or active[0]["child_id"] != gateway.active_model_child_id):
+        raise DurableError("HotPin reviewer owned process is unavailable or ambiguous")
+    child = active[0]
+    alias = cfg["roles"]["review"]
+    expected = os.path.normcase(str(Path(cfg["safe_qwen_runtime"]["review"]["binary"]).resolve()))
+    parent_expected = os.path.normcase(str(Path(cfg["safe_qwen_gateway"]["binary"]).resolve()))
+    if (child.get("role") != "review" or child.get("alias") != alias
+            or child.get("containment") != "delegated" or child.get("boot") != supervisor.boot()
+            or child.get("run_id") != supervisor.store.state["run_id"]
+            or not child.get("identity") or not child["identity"].get("created")
+            or os.path.normcase(child["executable"]) != expected
+            or child["identity"].get("executable") != expected
+            or not child.get("parent_identity")
+            or child["parent_identity"].get("executable") != parent_expected
+            or supervisor.inspect(child["pid"]) != child["identity"]
+            or supervisor.inspect(child["parent_pid"]) != child["parent_identity"]
+            or len(processes) != 1 or processes[0].get("pid") != child["pid"]
+            or processes[0].get("parent_pid") != child["parent_pid"]
+            or os.path.normcase(str(Path(processes[0].get("path", "")).resolve())) != expected
+            or len(running) != 1 or type(running[0]) is not dict
+            or running[0].get("model") != alias or running[0].get("state") != "ready"):
+        raise DurableError("HotPin reviewer process/parent/alias identity mismatch")
+    return child
+
+
+def enforce_reviewer(gateway, running):
+    """Gate every HotPin review on pinned resources, owned handles and hard-cap readback."""
+    import environment
+    import winprocess
+    from durable import DurableError, current_fingerprint
+    cfg = gateway_config(gateway)
+    policy = validate_reviewer_policy(cfg) if cfg is not None else None
+    if policy is None:
+        return
+    require_reviewer_enforcement(cfg, "review")
+    drift = environment.compare(gateway.supervisor.store.state["environment"],
+                                current_fingerprint(gateway.supervisor.store))
+    if drift["decision"] in {"UNSAFE", "REVALIDATION_REQUIRED"}:
+        raise DurableError("SafeQwen runtime changed before reviewer inference")
+    child = reviewer_owned_child(gateway, cfg, running, winprocess.servers())
+    inherited = winprocess.hotpin_environment(child["pid"], expected_identity=child["identity"])
+    if (type(inherited) is not str or not inherited or inherited.startswith(("\\\\", "//"))
+            or not Path(inherited).is_absolute()
+            or os.path.normcase(str(Path(inherited).resolve(strict=True))) !=
+               os.path.normcase(policy["hot_experts"])):
+        raise DurableError("HotPin reviewer did not inherit the bound expert asset")
+    reviewer_expert_identity(cfg)
+    limit = winprocess.limit_working_set(child["pid"], policy["max_working_set_gb"],
+                                        expected_identity=child["identity"])
+    if (type(limit) is not dict or limit.get("pid") != child["pid"]
+            or type(limit.get("flags")) is not int or not limit["flags"] & 4 or limit["flags"] & 8
+            or type(limit.get("maximum_gb")) not in (int, float)
+            or not math.isfinite(limit["maximum_gb"]) or not 0 < limit["maximum_gb"] <= 32):
+        raise DurableError("HotPin reviewer hard working-set maximum is unproven")
+    reviewer_expert_identity(cfg)
+    if reviewer_owned_child(gateway, cfg, gateway.running(), winprocess.servers())["identity"] != child["identity"]:
+        raise DurableError("HotPin reviewer identity changed during native enforcement")
+    gateway.log.emit("hotpin_review_gate", child_id=child["child_id"], pid=child["pid"],
+                     process_identity_sha256=digest(child["identity"]),
+                     policy_sha256=digest(policy), expert_sha256=policy["hot_experts_sha256"],
+                     maximum_gb=limit["maximum_gb"], flags=limit["flags"])
+
+
 def validate_config(cfg):
     from urllib.parse import urlsplit
     u = urlsplit(cfg["base_url"])
@@ -52,6 +233,9 @@ def validate_config(cfg):
         value = cfg.get(name, 600)
         if type(value) not in (float, int) or not math.isfinite(value) or not 0 < value <= 3600:
             raise ValueError("SafeQwen timeout must be finite and in (0, 3600]")
+    if cfg.get("review_profiles"):
+        raise ValueError("SafeQwen does not support implicit HotPin profile deployment; use dedicated runtime configuration")
+    validate_reviewer_policy(cfg)
     if tool_protocol.TOOLS != ("read_files", "edit_file", "submit"):
         raise ValueError("SafeQwen tool inventory refused")
 
@@ -60,6 +244,7 @@ def identity(worker):
     if type(worker) is not SafeQwenExecutor:
         raise ValueError("Wrong SafeQwen executor type")
     validate_config(worker.config)
+    reviewer_expert_identity(worker.config)
     if type(worker.max_actions) is not int or not 1 <= worker.max_actions <= 32:
         raise ValueError("SafeQwen action bound refused")
     hashes = {name: file_sha(path) for name, path in SOURCES.items()}
@@ -86,6 +271,7 @@ def validate_pinned(cfg, executor=None):
             or pin.get("sources") != LOADED or pin.get("tools") != list(tool_protocol.TOOLS)
             or pin.get("operation_schema") != tool_protocol.schema()):
         raise ValueError("SafeQwen pinned source/configuration identity mismatch")
+    reviewer_expert_identity(cfg)
     if executor is not None and identity(executor) != pin:
         raise ValueError("Effective SafeQwen executor differs from pinned identity")
     return pin
@@ -107,6 +293,11 @@ def extend_capture(value, cfg, executor=None):
     for name, path in SOURCES.items():
         value["runtime"]["safe_qwen:" + name] = file_identity(path)
     value["runtime"]["safe_qwen:policy"] = {"sha256": pin["sha256"]}
+    expert = reviewer_expert_identity(cfg)
+    if expert is not None:
+        value["runtime"]["safe_qwen:review:hot_experts"] = expert
+        value["runtime"]["safe_qwen:review:resource_policy"] = {
+            "sha256": digest(cfg["safe_qwen_reviewer_policy"])}
     # Operator-supplied local runtime files, never discovered through private templates.
     for role, files in cfg["safe_qwen_runtime"].items():
         for kind, path in files.items():
@@ -150,8 +341,9 @@ def model_starting(supervisor, role):
     format is supported. No YAML interpreter, command expansion or process launch.
     """
     from durable import DurableError
-    supervisor.require_no_ambiguous_model()
     cfg = supervisor.store.state["options"]["config"]
+    require_reviewer_enforcement(cfg, role)
+    supervisor.require_no_ambiguous_model()
     validate_pinned(cfg)
     if role not in cfg["safe_qwen_runtime"]:
         raise DurableError("SafeQwen role has no pinned runtime")

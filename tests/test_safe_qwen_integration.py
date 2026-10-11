@@ -63,6 +63,9 @@ class IntegrationTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.repo, self.store, self.cfg = setup_test_fixture(self.root, "safe-integration")
         self.cfg.update(executor="safe_qwen", startup_timeout_seconds=30, timeout_seconds=60)
+        # These cases exercise generic scripted reviewers, not native HotPin enforcement.
+        self.cfg["model_metadata"][self.cfg["roles"]["review"]] = {
+            "display_name": "Offline generic reviewer", "runtime": "llama.cpp"}
         self.cfg["roles"]["code"] = "operator-qwen"
         self.cfg["base_url"] = "http://127.0.0.1:9333"
         self.resource = self.root / "runtime"

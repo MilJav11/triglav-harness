@@ -5,6 +5,43 @@ and retained final qualification report. No original run, raw Store, private
 identifier, prompt or machine-local link is distributed. No models were run for
 this documentation update.
 
+## Public Run 003
+
+**PUBLIC_FULL_HARNESS_PASS**, 10 October 2026, on the public feature working tree
+based on approved Phase 2B.2 commit `1b61c025318b979a1b4aa6f509f035a36fc8a573`
+plus reviewed Phase 2B.3 native enforcement. This result is distinct from the
+historical private Stage 2/TQ-02R deployments below.
+
+- One dry-run (exit 0, no model calls), then one live controller run (exit 0,
+  378.75 seconds), with separately provisioned local models/binaries.
+- Qwen: three real inference requests; only calculator.py changed.
+- Frozen tests: four PASS / six intentional errors before; ten PASS after.
+- Nemotron: one request, CRITIC_FINDINGS with one advisory INFO finding about
+  frozen-test-preservation evidence; not relabelled CRITIC_CLEAN.
+- GPT-OSS 120B: one request, REVIEWER_APPROVED / APPROVE, zero findings.
+- Approved CURRENT expert identity, 44 GiB available-RAM gate, exact native
+  ownership/inheritance and 32.0 GiB HARD maximum readback (flags 6) passed.
+  The native gate repeated on cached-role reuse before reviewer inference.
+- Fresh final deterministic verification passed ten tests after approval.
+  Durable checkpoint, candidate/reviews/verifier bindings and cleanup validated.
+  Independent post-run tests also passed ten; frozen test identity was unchanged.
+- Actual state COMPLETED / TRUSTED_CHECKPOINT; all owned model processes and
+  Gateway stopped, PID record removed. No new controller/fixture commit occurred.
+
+The public [calculator fixture](../../examples/calculator/README.md),
+[configuration examples](../WINDOWS_SETUP.md) and existing runtime integration
+now describe this bounded workflow without private helpers. Binaries, model
+shards and an operator-approved expert asset/digest are not distributed. New
+hosts/runtime versions require separate validation. This test establishes
+neither historical asset provenance nor optimal expert selection, broad host
+isolation, live TTL reload, recovery/resume or sustained multi-step autonomy.
+The hard cap is process working set after readiness, not total/loading RAM or VRAM.
+The controller checkpoint is evidence, not a Git commit or human semantic audit.
+
+WorkUnit reporting still leaves manager phase READY, completion null and legacy
+proven_checks empty despite top-level COMPLETED and a validated milestone
+checkpoint. No reporting repair or historical evidence rewrite was performed.
+
 ## Phase 8B Stage 2
 
 **PHASE_8B_STAGE2_PASS**, completed 10 October 2026. The verified public source
@@ -34,7 +71,7 @@ arbitrary unattended production readiness or a human semantic approval. The
 Manager reporting discrepancy limits summary claims; it does not replace the
 independently validated verifier/review/checkpoint evidence.
 
-**Clone readiness: PARTIAL.** Public source and guarded offline checks are
+**Historical Phase 8B reproduction remains separate.** Public source and guarded offline checks are
 available. The private operator/watchdog helpers, runtime deployment, frozen
 qualification fixture and evidence package are not supplied. A clean clone
 does not reproduce the full chain. See the

@@ -22,147 +22,129 @@
 
 ## Overview
 
-TRIGLAV is a Python controller for local coding agents on **native Windows**.
-It coordinates scoped edits, verification commands, model review and durable
-recovery. Executor completion claims are untrusted; the controller owns the
-evidence and acceptance gates. Humans review meaning, test suitability and promotion.
-
-The default `custom` executor uses a bounded JSON action protocol. `run` handles
-one supervised task; `long-run`, `resume` and `status` provide durable state.
-`autonomous-run` and `autonomous-resume` expose a bounded ManagerLoop with
-WorkUnit contracts, planning and scheduling.
-
-**Verified Phase 8B source baseline:** public commit
-`1a3167830f8d1fdf79dba255346784f57793a3ce` contains 111 tracked files and passed
-**129/129 guarded offline CI tests**. The opt-in [SafeQwen integration](docs/SAFEQWEN.md)
-includes a closed-tool worker, fixed-WorkUnit launcher and direct identity adapter.
-**Phase 8B Stage 2 qualification completed successfully** on one bounded fixture:
-Qwen execution, Nemotron findings, GPT-OSS approval, fresh final verification and
-a validated trusted checkpoint. See the [qualification summary](docs/triglav/QUALIFICATION.md#phase-8b-stage-2).
-
-**Clone readiness: PARTIAL.** Public source functionality and offline checks are
-available; the qualified deployment additionally used private operator tooling
-and locally provisioned model runtimes. A clean clone does not reproduce that
-full chain or historical TQ-02R. This is not general autonomous coding or
-production certification. The [documentation index](docs/triglav/README.md)
-lists storage locations, Git exclusions and missing reproduction assets.
+TRIGLAV is an experimental local coding harness for native Windows, inspired by
+AMAP-ML/LongHorizon-Harness: bounded work, deterministic verification, recorded
+evidence and recovery/checkpoint gates. Models propose changes; the Python
+controller decides whether the evidence permits acceptance.
 
 ## Architecture
 
-The code executor proposes a candidate. Deterministic checks test it, review
-policy adds model assessment, and final evidence gates control acceptance.
-Failed gates lead to bounded retry or stop. Durable paths record checkpoints
-for recovery; a checkpoint does not replace human semantic review.
+The simplest path uses the included SafeQwen worker for one operator-scoped task.
+It can swap compatible local models through configuration. The optional full path
+adds an advisory critic and a distinct independent reviewer:
 
 ```mermaid
 flowchart LR
-    E["Code executor"] --> V["Initial<br/>verification"]
-    V -->|"review not required"| F["Final verification<br/>+ freshness gates"]
-    V -.-> R["Review policy<br/>optional advisory Critic<br/>code / optional GPT-OSS"]
-    R -.-> F
-    F --> A["Controller acceptance<br/>durable: checkpoint<br/>+ validated recovery"]
-    A --> H["Human<br/>semantic review"]
+    E[Qwen executor] --> V[Deterministic tests]
+    V --> C[Nemotron critic]
+    C --> R[Independent GPT-OSS reviewer]
+    R --> F[Fresh final tests and identity checks]
+    F --> T[Trusted evidence checkpoint]
 ```
 
-| Component | Responsibility |
-|---|---|
-| Qwen / code executor | Proposes scoped edits; cannot authorize acceptance |
-| Nemotron / critic | Supplies advisory findings when policy enables it |
-| GPT-OSS / senior reviewer | Assesses code and verifier/critic evidence when required |
-| Python controller | Enforces scope, budgets, lifecycle, verification and checkpoint gates |
-| Human operator | Evaluates semantics, tests and promotion |
-
-OpenCode is an opt-in external executor, with the retained integration pinned to
-1.18.30. Cline is an external CLI for the retained WorkUnit adapter. Neither is the
-default entry point; Aider comparisons are not a shipped runtime.
-See [architecture](ARCHITECTURE.md) and [executor boundaries](OPENCODE_BOUNDARY.md).
+Code-only execution ends at an intermediate `READY / MILESTONE_READY` result;
+it does **not** create a trusted checkpoint. Model approval cannot override a
+failed test, scope, ownership or checkpoint gate. The existing custom executor,
+Manager/WorkUnit routes and optional adapters remain available; see
+[architecture](ARCHITECTURE.md) and [SafeQwen authority](docs/SAFEQWEN.md).
 
 ## Quick Start
 
-This is a **source-only** start on native Windows with Python 3.11+, Git and
-PowerShell on PATH. The controller uses the Python standard library;
-[requirements-dev.txt](requirements-dev.txt) lists pytest for development, while
-the guarded CI entry point uses unittest. No model or gateway is needed below.
+Use native Windows, **x64 Python 3.11+**, Git and PowerShell. Python 3.11 is the
+Windows CI baseline. The controller and guarded tests use the standard library;
+no pip install, models, Gateway, OpenCode or Cline are required for offline checks.
 
 ```powershell
 git clone https://github.com/MilJav11/triglav-harness.git
 cd triglav-harness
-python -B harness.py --help
 python -B scripts/ci_offline.py
 ```
 
-Help is offline. The reviewed CI command parses Python, checks CLI/dry-run
-behavior and runs scripted model responses with disposable fixtures. It does
-not install dependencies, start a gateway or run models. It executes trusted
-fixture code and Git/Python subprocesses; use the committed checkout.
+Expected: exit **0**, `PASS: 209 reviewed offline cases; CLI help; ...; model calls 0`.
+The runner uses scripted responses, trusted disposable Git fixtures and real
+Windows supervision; this is not a live-model test. The release changes described
+here must first be committed/published: the existing remote revision does not
+contain an uncommitted local working tree.
 
-For a different workstation, use the [portable Windows setup baseline](docs/WINDOWS_SETUP.md)
-for public dependency links, operator-local three-role examples and the exact
-remaining HotPin resource-policy integration seam. Clone readiness remains PARTIAL.
+### Local Qwen calculator demo
 
-For live use, first read the [runbook](RUNBOOK.md) and
-[SafeQwen setup and limits](docs/SAFEQWEN.md). Provision compatible llama-swap,
-model servers, weights and any optional executor CLIs separately, then adapt the
-configuration examples. The supplied absolute defaults are installation examples,
-not runtime discovery. The privately qualified tooling, deployment configuration
-and frozen fixture are not a public reproduction package; see
-[dependencies and missing integration assets](docs/triglav/README.md#dependencies-and-missing-integration-assets).
+The [public calculator fixture](examples/calculator/README.md) contains four
+passing addition tests and six intentionally failing multiplication tests.
+Create a **new** disposable Git target from those files; keep its tests frozen.
+The [Windows demo recipe](docs/WINDOWS_SETUP.md#local-qwen-demo) gives exact
+fixture creation, configurable runtime setup, dedicated Gateway/PID ownership
+and shutdown steps. Separately provision compatible llama-swap, llama-server and
+Qwen3-Coder-30B-A3B GGUF files; no model/runtime binary is bundled or downloaded by
+this repository. No HotPin asset is needed for the basic demo.
+
+After following that setup, from the controller root:
+
+```powershell
+python -B harness.py --config config/safeqwen.local.json autonomous-run `
+  --executor safe_qwen --safeqwen-policy config/safeqwen-policy.local.json `
+  --repo ../disposable-calculator --task "Implement multiply in calculator.py" `
+  --verify "python -m unittest test_calculator.py" `
+  --acceptance "All ten frozen tests pass; only calculator.py changes" `
+  --allow calculator.py --forbid test_calculator.py --dry-run --quiet
+```
+
+Require dry-run exit **0** and `models_contacted: false`. Then run that command
+**once**, removing only `--dry-run`, to invoke the local Qwen model. Successful
+code-only coding normally returns exit **2**, `READY / MILESTONE_READY`, and
+**10/10 tests passing**, with only `calculator.py` changed. Inspect the actual
+run evidence and independently run the frozen tests. Exit 2 is not a trusted
+checkpoint. Preserve failed attempts; do not silently rerun or reset the fixture.
+
+### Optional three-model qualification
+
+The [advanced recipe](docs/WINDOWS_SETUP.md#optional-three-model-workflow) reuses
+the existing Qwen -> Nemotron -> GPT-OSS route, explicit reviewer policy and
+owned-process checks. It requires separately provisioned compatible runtimes,
+all GPT-OSS shards and an operator-approved expert asset/digest. Review requires
+**44 GiB available RAM** and **32 GiB hard process working-set readback before
+inference**, including cached-role reuse. These are not total RAM/VRAM or loading
+memory guarantees. Optional HotPin work does not block the code-only demo.
 
 ## Verification
 
-Run the reviewed offline checks from a committed Windows checkout:
+On 10 October 2026, Public Run 003 executed real Qwen (3 calls), Nemotron (1 call,
+`CRITIC_FINDINGS`, one advisory finding) and GPT-OSS (1 call, `APPROVE`). All ten
+frozen tests and fresh final verification passed; a trusted evidence checkpoint
+was independently validated and owned-process cleanup passed. This was one
+bounded WorkUnit on one operator-provisioned host, not a portable binary bundle.
+See the [sanitized qualification summary](docs/triglav/QUALIFICATION.md#public-run-003).
 
-```powershell
-python -B scripts/ci_offline.py
-```
-
-[Offline CI](docs/CI.md) parses all Python source, runs **8 executor-protocol,
-14 planner-protocol and 10 guard tests**, plus **39 SafeQwen worker, 40 integration
-and 8 selected final-verification/checkpoint regressions**, plus **10 milestone
-verifier timeout regressions** (**129 total**), and captures CLI help. Model replies are
-mocked/scripted. Planner cases use disposable Git fixtures and the real Python
-supervision broker; network/process/Gateway guards constrain the reviewed checks.
-Controller identity uses actual Git HEAD, without the earlier export audit's shim.
-
-CI runs on GitHub-hosted Windows with Python 3.11 for pull requests to main and
-pushes to main. It has read-only contents permission, no repository secrets,
-no persistent checkout credentials and a ten-minute timeout. This bounded scope
-is not full test coverage. Do not run the entire suite or smoke scripts blindly:
-retained tests include native process, local HTTP server and optional CLI cases.
-
-[Public validation history](VALIDATION.md) describes earlier executed/skipped work.
-Offline CI does not rerun live qualification. The completed Phase 8B Stage 2
-result is documented separately. The Manager reporting discrepancy remains:
-**ALL_CRITERIA_PROVEN versus nested AC1 NOT_PROVEN / completion null** in Stage 2
-(and AC1–AC3 in historical TQ-02R). See [qualification limits](docs/triglav/QUALIFICATION.md#reporting-discrepancy).
-Model reviews and hashes do not establish semantic correctness.
+The current guarded scope is **209 offline cases**, including policy/identity,
+native fake-handle, cached/TTL and final-checkpoint regressions. See
+[CI scope](docs/CI.md). Offline success never proves live behavior. Do not run
+all retained smoke scripts blindly; some intentionally invoke live models or
+external CLIs.
 
 ## Safety
 
-Use trusted repositories and tests: verification executes repository code.
-Scope checks, closed protocols, CI guards and Windows process ownership are
-**not an OS sandbox**. Use a dedicated gateway because unload affects its resident
-models. Protect local configuration, logs and evidence.
+Use trusted repositories and frozen tests: verification executes candidate code.
+Scope and process-ownership checks are **not an OS sandbox**. Use a dedicated
+loopback Gateway and keep model assets, credentials, local configurations, PID
+files, logs and raw evidence outside publication. Runtime commands and model
+paths are operator-configurable; templates use fictional paths.
 
-Hostile-repository safety, concurrency, all crash windows, broad unattended
-operation, long-horizon autonomy and universal resource bounds are not established.
-No cross-platform or small-hardware qualification, production certification or
-blanket autonomous-engineering safety guarantee is claimed.
-
-Read [safety and limitations](docs/triglav/SAFETY_AND_LIMITATIONS.md),
-[process supervision](PROCESS_SUPERVISION.md), [durable runs](DURABLE_RUNS.md)
-and the [recovery protocol](CONVERGENCE.md).
+Unverified: sustained multi-step long-horizon execution, live recovery/resume and
+TTL reload, adversarial repositories, concurrent host mutations, cross-machine
+runtime compatibility and general semantic correctness. WorkUnit checkpoints
+and legacy Manager criteria reporting are distinct; see
+[qualification limits](docs/triglav/QUALIFICATION.md#reporting-discrepancy).
+No private Stage 2 watchdog, broker or evidence package is required by the public
+SafeQwen demo. Licensed models, native binaries and host capacity remain external
+prerequisites. Read [setup](docs/WINDOWS_SETUP.md), [runbook](RUNBOOK.md),
+[recovery](CONVERGENCE.md) and [limitations](docs/triglav/SAFETY_AND_LIMITATIONS.md).
 
 ## Roadmap
 
-Phase 8B Stage 2 is complete for one privately provisioned bounded fixture.
-Public deployment reproducibility, Aider evaluation, smaller reviewers, host
-isolation and broader multi-project autonomy remain proposed work. No experimental terminal
-banner is shipped. See the [roadmap](docs/triglav/ROADMAP.md) and
-[public documentation](docs/triglav/README.md) for scope and evidence.
+The next product milestone is **PUBLIC GITHUB READINESS**: reproducible offline
+checks, a bounded local demo and clear configuration. Further optimization is
+deferred. One-work-unit qualification does not establish general autonomy.
 
-Eligible original software and associated documentation use the [MIT License](LICENSE),
-copyright 2026 MilJav11. See [licensing and provenance](LICENSING.md).
-The owner-approved independent logo remains under the separate [brand usage policy](BRAND_USAGE.md)
-and [artwork provenance](docs/triglav/assets/README.md); the prior reference-derived
-artwork is excluded.
+Eligible original software/documentation use the [MIT License](LICENSE),
+copyright 2026 MilJav11; see [licensing](LICENSING.md). The independent logo has
+its separate [brand usage policy](BRAND_USAGE.md) and
+[artwork provenance](docs/triglav/assets/README.md).

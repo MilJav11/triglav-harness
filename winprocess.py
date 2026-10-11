@@ -220,11 +220,11 @@ def servers():
     return result
 
 
-def hotpin_environment(pid):
+def hotpin_environment(pid, expected_identity=None):
     """Read only LLAMA_HOT_EXPERTS from a native x64 child PEB for validation."""
-    if C.sizeof(C.c_void_p) != 8:
-        raise RuntimeError("Environment evidence requires native x64 Python")
-    k = C.WinDLL("kernel32", use_last_error=True)
+    if os.name != "nt" or C.sizeof(C.c_void_p) != 8:
+        raise RuntimeError("Environment evidence requires native x64 Windows Python")
+    k = _kernel()
     n = C.WinDLL("ntdll")
     k.OpenProcess.argtypes = [W.DWORD, W.BOOL, W.DWORD]
     k.OpenProcess.restype = W.HANDLE
@@ -238,8 +238,12 @@ def hotpin_environment(pid):
         data, used = C.create_string_buffer(count), C.c_size_t()
         if not k.ReadProcessMemory(handle, addr, data, count, C.byref(used)):
             raise C.WinError(C.get_last_error())
-        return data.raw[:used.value]
+        if used.value != count:
+            raise RuntimeError("Incomplete HotPin environment read")
+        return data.raw
     try:
+        if expected_identity is not None and _handle_identity(k, handle) != expected_identity:
+            raise RuntimeError("HotPin environment process identity mismatch")
         basic = (C.c_ulonglong * 6)()
         status = n.NtQueryInformationProcess(handle, 0, basic, C.sizeof(basic), None)
         if status:
@@ -252,19 +256,24 @@ def hotpin_environment(pid):
             data.extend(read(env + offset, 2))
             if len(data) >= 4 and data[-4:] == b"\0\0\0\0":
                 break
-        for value in data.decode("utf-16-le").split("\0"):
-            if value.startswith("LLAMA_HOT_EXPERTS="):
-                return value.split("=", 1)[1]
-        return None
+        else:
+            raise RuntimeError("Unterminated HotPin environment")
+        values = [value.split("=", 1)[1] for value in data.decode("utf-16-le").split("\0")
+                  if value.upper().startswith("LLAMA_HOT_EXPERTS=")]
+        if len(values) > 1:
+            raise RuntimeError("Ambiguous HotPin expert environment")
+        if expected_identity is not None and _handle_identity(k, handle) != expected_identity:
+            raise RuntimeError("HotPin environment process identity changed")
+        return values[0] if values else None
     finally:
         k.CloseHandle(handle)
 
 
-def limit_working_set(pid, maximum_gb):
+def limit_working_set(pid, maximum_gb, expected_identity=None):
     """Apply and read back a process-only hard maximum, retaining HotPin's minimum."""
     if os.name != "nt":
         raise RuntimeError("Reviewer working-set limit requires Windows")
-    k = C.WinDLL("kernel32", use_last_error=True)
+    k = _kernel()
     k.OpenProcess.argtypes = [W.DWORD, W.BOOL, W.DWORD]
     k.OpenProcess.restype = W.HANDLE
     k.CloseHandle.argtypes = [W.HANDLE]
@@ -274,6 +283,8 @@ def limit_working_set(pid, maximum_gb):
     if not handle:
         raise C.WinError(C.get_last_error())
     try:
+        if expected_identity is not None and _handle_identity(k, handle) != expected_identity:
+            raise RuntimeError("Working-set process identity mismatch")
         minimum, maximum, flags = C.c_size_t(), C.c_size_t(), W.DWORD()
         if not k.GetProcessWorkingSetSizeEx(handle, C.byref(minimum), C.byref(maximum), C.byref(flags)):
             raise C.WinError(C.get_last_error())
@@ -284,8 +295,11 @@ def limit_working_set(pid, maximum_gb):
             raise C.WinError(C.get_last_error())
         if not k.GetProcessWorkingSetSizeEx(handle, C.byref(minimum), C.byref(maximum), C.byref(flags)):
             raise C.WinError(C.get_last_error())
-        if not flags.value & 4 or maximum.value > cap:
+        if (not flags.value & 4 or flags.value & 8 or not 0 < maximum.value <= cap
+                or maximum.value < minimum.value):
             raise RuntimeError("Windows did not enforce the requested working-set ceiling")
+        if expected_identity is not None and _handle_identity(k, handle) != expected_identity:
+            raise RuntimeError("Working-set process identity changed")
         return dict(pid=pid, minimum_gb=minimum.value / 2**30,
                     maximum_gb=maximum.value / 2**30, flags=flags.value)
     finally:

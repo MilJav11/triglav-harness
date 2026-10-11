@@ -127,6 +127,12 @@ class SafeQwenExecutor:
             if (Path(store.directory).resolve().is_relative_to(Path(repo.root).resolve())
                     or Path(repo.root).resolve() != self.policy.root):
                 raise ExecutorError("Policy/Store repository mismatch", "MODEL_OWNERSHIP_REQUIRED")
+            from safe_executor_binding import is_safe_qwen_config, validate_pinned, gateway_config
+            if (is_safe_qwen_config(self.config) or is_safe_qwen_config(gw.config)
+                    or store.state.get("options", {}).get("work_unit_executor", {}).get("kind") == "safe_qwen"):
+                validate_pinned(self.config, self)
+                if gateway_config(gw) != self.config:
+                    raise ExecutorError("SafeQwen worker/Gateway configuration mismatch", "MODEL_ROUTING_MISMATCH")
             url = urlsplit(self.config["base_url"])
             if (url.scheme != "http" or url.hostname != "127.0.0.1" or not url.port
                     or url.username or url.password or url.path not in ("", "/") or url.query or url.fragment
