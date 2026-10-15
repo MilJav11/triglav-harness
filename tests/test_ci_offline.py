@@ -322,7 +322,7 @@ class GuardTests(unittest.TestCase):
         (valid_dir / "test_add.py").write_text(TEST_ADD_SOURCE, encoding="utf-8")
         (valid_dir / "test_sub.py").write_text(TEST_SUB_SOURCE, encoding="utf-8")
         self.policy.register_trusted_fixture(valid_dir, self.policy._registration_token)
-        self.assertIn(valid_dir, self.policy.authorized_fixtures)
+        self.assertIn(valid_dir.resolve(), self.policy.authorized_fixtures)
         self.policy.verifier([sys.executable, "-m", "unittest", "test_add"], valid_dir)
 
     def test_content_mutation_after_registration_is_denied(self):
@@ -405,8 +405,8 @@ class GuardTests(unittest.TestCase):
 
         wrapper6 = make_trusted_wave6_fixture(self.policy, legitimate_wave6_helper, self.policy._registration_token)
         repo6, _, _ = wrapper6(root6)
-        self.assertIn(repo6.root, self.policy.authorized_fixtures)
-        self.assertEqual(self.policy.authorized_fixtures[repo6.root], "wave6_calc")
+        self.assertIn(repo6.root.resolve(), self.policy.authorized_fixtures)
+        self.assertEqual(self.policy.authorized_fixtures[repo6.root.resolve()], "wave6_calc")
 
         root2 = self.fixture / "fresh_wave2"
         root2.mkdir()
@@ -423,8 +423,8 @@ class GuardTests(unittest.TestCase):
 
         wrapper2 = make_trusted_wave2_fixture(self.policy, legitimate_wave2_helper, self.policy._registration_token)
         repo2, _, _ = wrapper2(root2)
-        self.assertIn(repo2.root, self.policy.authorized_fixtures)
-        self.assertEqual(self.policy.authorized_fixtures[repo2.root], "wave6_calc")
+        self.assertIn(repo2.root.resolve(), self.policy.authorized_fixtures)
+        self.assertEqual(self.policy.authorized_fixtures[repo2.root.resolve()], "wave6_calc")
 
     def test_failed_construction_never_registers_fixture(self):
         # 11D: Failed construction never registers a fixture
