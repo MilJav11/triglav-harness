@@ -65,9 +65,7 @@ python -B scripts/ci_offline.py
 
 Expected: exit **0**, `PASS: 390 reviewed offline cases; CLI help; ...; model calls 0`.
 The runner uses scripted responses, trusted disposable Git fixtures and real
-Windows supervision; this is not a live-model test. The release changes described
-here must first be committed/published: the existing remote revision does not
-contain an uncommitted local working tree.
+Windows supervision; this is not a live-model test.
 
 ### Local Qwen calculator demo
 
@@ -110,14 +108,12 @@ memory guarantees. Optional HotPin work does not block the code-only demo.
 
 ## Verification
 
-## Verification
-
 Triglav enforces deterministic verification and multi-stage review across guarded offline CI and live executions:
 
 ### Live Milestones
 - **Live Run 002 (15 October 2026):** **LIVE_002_INDEPENDENTLY_CONFIRMED**. Real local execution of two genuinely dependent WorkUnits (`multiply` -> `scale`) with real Qwen3-Coder (executor), Nemotron (advisory critic, `CRITIC_CLEAN`), and GPT-OSS 120B (senior reviewer, `APPROVE`). All **15/15 final frozen tests passed** (4 addition regression, 6 multiplication, 5 scale). Committed **213 validated WAL records** in `events.jsonl`, validated trusted checkpoint `checkpoints/0000.json`, and committed terminal acceptance seal `term-20261015T095036Z-a778f62c8873.json`. Independently confirmed by Codex review.
 - **Live Run 001 (14 October 2026):** Single coding WorkUnit (`multiply`), 10/10 frozen tests passed, real three-model execution, 136 validated WAL records, terminal acceptance seal `term-20261014T091225Z-a23b9b7ed41c.json`.
-- **Public Run 003 (10 October 2026):** Bounded single-unit execution with 10/10 tests and trusted checkpoint.
+- **Public Run 003 (10 October 2026):** Initial bounded single-unit baseline execution with 10/10 tests and trusted checkpoint, preceding Live Run 001 and Live Run 002.
 
 See the [qualification summary](docs/triglav/QUALIFICATION.md) for full records.
 
@@ -139,7 +135,7 @@ Unverified: sustained multi-step long-horizon execution (>2 units), live error r
 
 ## Roadmap & Phase 3
 
-Following the confirmed M0 milestone (`LIVE_002_INDEPENDENTLY_CONFIRMED`), the project establishes its architectural baseline for GitHub readiness before Phase 3:
+Following the confirmed M0 milestone (`LIVE_002_INDEPENDENTLY_CONFIRMED`), the project has established its public preview baseline before Phase 3:
 
 1. **Phase 3.1 — Controlled Bounded Recovery:** Replanning, diagnostic error capture, and bounded retry after a failed WorkUnit without human intervention.
 2. **Phase 3.2 — Safe Interruption & Resume:** Pausing active campaigns (SIGINT) and resuming cleanly from trusted checkpoints during live model operation.
