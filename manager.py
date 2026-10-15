@@ -683,7 +683,7 @@ def validate(manager, state):
 def create_run(store, repo, task, commands, config, *, criteria, reviewer=False, critic=False, budgets=None,
                allow=(), forbid=(), config_path=None, review_policy="risk",
                work_units=None, verifier_registry=None, work_unit_planning=False,
-               capability_policy=None, executor=None):
+               capability_policy=None, executor=None, terminal_acceptance=False):
     if review_policy not in ("risk", "three-model"):
         raise ValueError("Unknown review policy")
     if review_policy == "three-model" and not (critic and reviewer):
@@ -726,6 +726,8 @@ def create_run(store, repo, task, commands, config, *, criteria, reviewer=False,
         options_update["verifier_registry"] = copy.deepcopy(verifier_registry)
     if capability_policy is not None:
         options_update["capability_policy"] = copy.deepcopy(capability_policy)
+    if terminal_acceptance:
+        options_update["terminal_acceptance"] = True
     if options_update:
         options = copy.deepcopy(store.state["options"])
         options.update(options_update)
@@ -760,14 +762,71 @@ def validate_repository(store, repo):
     return "unverified"
 
 
+def bind_controller_authority(store, controller):
+    """Bind and register controller authority on a Store instance.
+
+    controller MUST be an actual Manager/controller instance bound to store.
+    Arbitrary dictionaries or strings cannot be registered as Manager authority.
+    """
+    if not hasattr(store, "register_controller_authority"):
+        return None
+    if controller is None:
+        raise TypeError("controller is required; omitting controller cannot establish authority")
+    if isinstance(controller, (str, dict)):
+        raise TypeError("Arbitrary caller dictionaries or strings cannot be registered as Manager authority")
+    if not isinstance(controller, ManagerLoop):
+        raise TypeError(f"Unauthorized controller type '{type(controller).__name__}'; must be a real ManagerLoop")
+    if not hasattr(controller, "store") or controller.store is not store:
+        raise ValueError("Controller is not bound to this Store instance")
+
+    existing = getattr(controller, "controller_authority", None)
+    if (
+        existing is not None
+        and hasattr(store, "_is_authorized_controller")
+        and store._is_authorized_controller(existing)
+    ):
+        return existing
+
+    run_id = (
+        (store.state.get("run_id") if getattr(store, "state", None) else None)
+        or (store.directory.name if getattr(store, "directory", None) else "run")
+    )
+    authority = {
+        "controller_type": type(controller).__name__,
+        "run_id": run_id,
+        "instance_id": uuid.uuid4().hex,
+        "created_at": now(),
+    }
+    registered = store.register_controller_authority(authority)
+    controller.controller_authority = registered
+    return registered
+
+
 # ----------------------------------------------------------------------------- the loop
 
 class ManagerLoop:
-    def __init__(self, store, supervisor, repo, gateway, agents, log, clock=time.monotonic):
+    def __init__(self, store, supervisor, repo, gateway, agents, log, clock=time.monotonic, terminal_acceptance=None):
         self.store, self.supervisor, self.repo, self.gateway = store, supervisor, repo, gateway
         self.agents, self.log, self.clock = agents, log, clock
+        if self.repo is not None:
+            if not isinstance(getattr(self.repo, "log", None), durable.DurableLog) or getattr(self.repo.log, "store", None) is not self.store:
+                self.repo.log = durable.DurableLog(self.store)
         if agents is not None:
             durable.bind_work_unit_executor(self.store, getattr(agents, "executor", None))
+        self.controller_authority = None
+        self.controller_authority = bind_controller_authority(self.store, self)
+        effective_terminal = (
+            terminal_acceptance
+            if terminal_acceptance is not None
+            else self.options().get("terminal_acceptance", False)
+        )
+        self.terminal_acceptance = bool(effective_terminal)
+        if (
+            not self.store.is_terminal_accepted()
+            and terminal_acceptance is not None
+            and terminal_acceptance != self.options().get("terminal_acceptance", False)
+        ):
+            self.store.commit(options={**self.store.state["options"], "terminal_acceptance": bool(terminal_acceptance)})
         self.base_runtime = store.state.get("manager", {}).get("runtime_seconds", 0.0) if "manager" in store.state else 0.0
         self.started = clock()
         self.round_started = self.started
@@ -996,6 +1055,9 @@ class ManagerLoop:
         )
         return executor.execute()
 
+    def get_controller_authority(self):
+        return self.controller_authority
+
     def run_final_verification(self):
         from reviewer_executor import execute_final_verification
         return execute_final_verification(
@@ -1005,6 +1067,18 @@ class ManagerLoop:
             clock=self.clock,
         )
 
+    def validate_acceptance_readiness(self, final_verification_result=None, checkpoint_id=None, checkpoint_path=None):
+        from reviewer_executor import validate_acceptance_readiness
+        return validate_acceptance_readiness(
+            self.store,
+            self.repo,
+            final_verification_result=final_verification_result,
+            config=self.store.state.get("options", {}).get("config"),
+            controller=self,
+            checkpoint_id=checkpoint_id,
+            checkpoint_path=checkpoint_path,
+        )
+
     def create_trusted_checkpoint(self, final_verification_result):
         from reviewer_executor import create_trusted_checkpoint
         return create_trusted_checkpoint(
@@ -1012,7 +1086,203 @@ class ManagerLoop:
             self.repo,
             final_verification_result,
             self.store.state.get("options", {}).get("config"),
+            controller=self,
         )
+
+    def finalize_terminal_acceptance(self, final_verif):
+        """Execute M0-C terminal acceptance lifecycle in strict required order:
+        1. Confirm WorkUnits completed.
+        2. Confirm required deterministic verification and senior approval.
+        3. Validate exact M0-B evidence and establish intermediate trusted checkpoint.
+        4. Perform mandatory model/process cleanup using real existing APIs.
+        5. Confirm Supervisor shutdown and required Gateway unload outcomes.
+        6. Recheck relevant repository, environment and evidence identity after cleanup.
+        7. Resolve valid post-cleanup evidence and authoritative controller state.
+        8. Invoke the approved Store.commit_terminal() mechanism.
+        9. Reload and confirm authoritative terminal acceptance from durable persisted state.
+        10. Publish final success only after the terminal WAL commit succeeds.
+        """
+        # Step 1: Confirm WorkUnits finished
+        wu_section = self.store.state.get("work_units")
+        if not wu_section or not isinstance(wu_section, dict):
+            raise Stop("FAILED", "FINALIZATION_INVALID", "No WorkUnits present for terminal finalization")
+        seq = wu_section.get("sequence", [])
+        if not seq:
+            raise Stop("FAILED", "FINALIZATION_INVALID", "WorkUnit sequence is empty")
+        units = wu_section.get("units", {})
+        for uid in seq:
+            u = units.get(uid)
+            if not u or u.get("status") != "UNIT_VERIFIED":
+                raise Stop("FAILED", "FINALIZATION_INVALID", f"WorkUnit {uid} is not UNIT_VERIFIED")
+
+        # Step 2: Confirm required deterministic verification and senior approval
+        if not final_verif or not isinstance(final_verif, dict):
+            raise Stop("FAILED", "FINAL_VERIFICATION_INVALID", "Final verification result must be a dictionary")
+        if not final_verif.get("passed"):
+            raise Stop("FAILED", "FINAL_VERIFICATION_FAILED", "Final deterministic verification did not pass")
+
+        reviewer_required = bool(
+            self.store.state.get("options", {}).get("reviewer")
+            or self.m().get("options", {}).get("reviewer")
+            or "milestone_id" in self.store.state
+            or self.store.state.get("work_units")
+        )
+        if reviewer_required:
+            rev_res = self.m().get("reviewer_result")
+            if not rev_res or rev_res.get("decision") != "APPROVE":
+                raise Stop("FAILED", "REVIEWER_NOT_APPROVED", "Senior reviewer did not approve candidate")
+
+        # Step 3: Validate exact M0-B evidence
+        self.validate_acceptance_readiness(final_verif)
+
+        # Step 4: Mandatory model/process cleanup using real existing APIs (no Store lock held)
+        if self.gateway is not None:
+            try:
+                self.gateway.unload()
+            except Exception as exc:
+                raise Stop("FAILED", "CLEANUP_FAILED", f"Gateway unload failed during terminal cleanup: {exc}") from exc
+
+        if self.supervisor is not None:
+            try:
+                self.supervisor.require_idle()
+            except Exception as exc:
+                raise Stop("FAILED", "CLEANUP_FAILED", f"Supervisor require_idle failed during terminal cleanup: {exc}") from exc
+
+            if hasattr(self.supervisor, "shutdown"):
+                try:
+                    shutdown_timeout = 5.0
+                    cfg = self.options().get("config", {}) if hasattr(self, "options") else {}
+                    if isinstance(cfg, dict):
+                        shutdown_timeout = float(cfg.get("shutdown_timeout_seconds", 5.0))
+                    self.supervisor.shutdown(timeout=shutdown_timeout)
+                except Exception as exc:
+                    raise Stop("FAILED", "CLEANUP_FAILED", f"Supervisor shutdown failed during terminal cleanup: {exc}") from exc
+
+        # Step 5: Confirm Supervisor shutdown and required Gateway unload outcomes
+        if self.supervisor is not None:
+            if getattr(self.supervisor, "failure", None) is not None:
+                raise Stop("FAILED", "SUPERVISOR_ACTIVE", f"Supervisor shutdown failed with failure: {self.supervisor.failure}")
+            if len(getattr(self.supervisor, "failures", [])) > 0:
+                raise Stop("FAILED", "SUPERVISOR_ACTIVE", f"Supervisor shutdown failed with recorded failures: {self.supervisor.failures}")
+            if getattr(self.supervisor, "closed", False) is not True:
+                raise Stop("FAILED", "SUPERVISOR_ACTIVE", "Supervisor shutdown incomplete: closed is False")
+            th = getattr(self.supervisor, "thread", None)
+            if th is not None and th.is_alive():
+                raise Stop("FAILED", "SUPERVISOR_ACTIVE", "Supervisor shutdown incomplete: heartbeat thread is still running")
+            if getattr(self.supervisor, "state", "") != "closed":
+                raise Stop("FAILED", "SUPERVISOR_ACTIVE", f"Supervisor shutdown incomplete: state is '{getattr(self.supervisor, 'state', '')}'")
+            try:
+                self.supervisor.require_idle()
+            except Exception as exc:
+                raise Stop("FAILED", "SUPERVISOR_ACTIVE", f"Supervisor children not idle after shutdown: {exc}") from exc
+
+        if self.gateway is not None:
+            if hasattr(self.gateway, "running"):
+                try:
+                    running = self.gateway.running()
+                    if running:
+                        raise Stop("FAILED", "GATEWAY_UNLOAD_INCOMPLETE", f"Gateway unload incomplete: models still running: {running}")
+                except Exception as exc:
+                    if isinstance(exc, Stop):
+                        raise
+                    raise Stop("FAILED", "GATEWAY_UNLOAD_INCOMPLETE", f"Gateway running probe failed: {exc}") from exc
+            if getattr(self.gateway, "active_role", None) is not None:
+                raise Stop("FAILED", "GATEWAY_UNLOAD_INCOMPLETE", f"Gateway unload incomplete: active role is still {self.gateway.active_role}")
+            if getattr(self.gateway, "active_model_child_id", None) is not None:
+                raise Stop("FAILED", "GATEWAY_UNLOAD_INCOMPLETE", "Gateway unload incomplete: active model child ID is still set")
+
+        # Step 6: Recheck relevant repository, environment and evidence identity after cleanup
+        from work_unit_scheduler import capture_fs_snapshot
+
+        current_snap = snapshot(self.repo)
+        expected_head = final_verif["evidence"]["candidate_fingerprint"]
+        expected_snap_digest = final_verif["evidence"]["candidate_snapshot_digest"]
+        expected_fs_digest = final_verif["evidence"]["final_filesystem_snapshot_digest"]
+
+        if current_snap["head"] != expected_head:
+            raise Stop("HUMAN_ACTION_REQUIRED", "REPOSITORY_DRIFT",
+                       f"Candidate HEAD changed after cleanup: {current_snap['head']} != {expected_head}")
+        if digest(current_snap) != expected_snap_digest:
+            raise Stop("HUMAN_ACTION_REQUIRED", "REPOSITORY_DRIFT",
+                       "Candidate repository snapshot changed after cleanup")
+        current_fs = capture_fs_snapshot(self.repo.root)
+        if digest(current_fs) != expected_fs_digest:
+            raise Stop("HUMAN_ACTION_REQUIRED", "REPOSITORY_DRIFT",
+                       "Candidate filesystem mutated after cleanup")
+
+        self.guard_environment()
+
+        lvc = self.store.state.get("last_verified_checkpoint")
+        if lvc and lvc.get("reference"):
+            ckpt_data = self.store.read_evidence(lvc["reference"])
+            durable.validate_checkpoint_evidence(self.store, ckpt_data)
+            if ckpt_data.get("candidate_fingerprint") != expected_head:
+                raise durable.DurableError("Checkpoint candidate fingerprint mismatch with verified head")
+
+        # Step 7: Resolve valid post-cleanup evidence and authoritative controller state
+        self.validate_acceptance_readiness(final_verif)
+        checkpoint_result = self.create_trusted_checkpoint(final_verif)
+        checkpoint_ref = checkpoint_result.get("reference")
+        if not checkpoint_ref:
+            raise durable.DurableError("Trusted checkpoint creation produced no valid reference")
+
+        controller = self.controller_authority
+        if controller is None:
+            raise durable.DurableError("Controller authority is required for terminal acceptance")
+        if not self.store._is_authorized_controller(controller):
+            raise durable.DurableError("Controller authority is not authorized for Store terminal acceptance")
+
+        # Step 8: Invoke approved Store.commit_terminal() mechanism
+        acceptance_id = f"term-{self.store.state['run_id']}"
+
+        def terminal_pre_write_guard(target_state):
+            guard_snap = snapshot(self.repo)
+            if guard_snap["head"] != expected_head:
+                raise durable.DurableError("Repository Git HEAD mutated during terminal acceptance")
+            if digest(guard_snap) != expected_snap_digest:
+                raise durable.DurableError("Repository candidate snapshot changed during terminal acceptance")
+            guard_fs = capture_fs_snapshot(self.repo.root)
+            if digest(guard_fs) != expected_fs_digest:
+                raise durable.DurableError("Repository filesystem mutated during terminal acceptance")
+
+        mgr_final = copy.deepcopy(self.store.state["manager"])
+        mgr_final["milestone_status"] = "TERMINAL_ACCEPTED"
+        mgr_final["stop"] = {
+            "status": "COMPLETED",
+            "reason": "ALL_CRITERIA_PROVEN",
+            "message": "All criteria proven; terminal acceptance committed",
+            "time": now(),
+            "round": self.store.state["round_number"],
+            "cleanup": "passed",
+            "resumable": False,
+        }
+        receipt = self.store.commit_terminal(
+            acceptance_id=acceptance_id,
+            controller=controller,
+            status="COMPLETED",
+            manager=mgr_final,
+            current_step="finished",
+            remaining_work=[],
+            unverified_work={},
+            pre_write_guard=terminal_pre_write_guard,
+        )
+
+        # Step 9: Reload and confirm authoritative terminal acceptance from durable persisted state
+        if not self.store.is_terminal_accepted():
+            raise durable.DurableError("Store instance did not confirm terminal acceptance after commit")
+
+        verify_store = durable.Store(self.store.directory.parent, self.store.directory.name)
+        loaded_state = verify_store.load()
+        if not verify_store.is_terminal_accepted():
+            raise durable.DurableError("Fresh store reload did not confirm terminal acceptance")
+        if loaded_state.get("status") != "COMPLETED":
+            raise durable.DurableError(f"Fresh store reload status '{loaded_state.get('status')}' != 'COMPLETED'")
+        if loaded_state.get("terminal_acceptance", {}).get("acceptance_id") != acceptance_id:
+            raise durable.DurableError("Fresh store reload terminal acceptance ID mismatch")
+
+        # Step 10: Publish final success only after the terminal WAL commit succeeds
+        self.note(f"terminal acceptance established: {acceptance_id}")
+        return write_report(self.store)
 
     def plan_work_units(self, planner=None, verifier_registry=None, capability_policy=None):
         import work_unit_planner as wup
@@ -1096,8 +1366,103 @@ class ManagerLoop:
         self.store.commit(work_units=wu_section, manager=manager)
         return canonical_specs, canonical_sequence
 
+    def process_work_unit_milestone(self, wu_result):
+        status = wu_result.get("status")
+        if status in ("MILESTONE_READY", "CRITIC_REVIEWED"):
+            if self.store.state.get("options", {}).get("critic", False):
+                critic_result = self.run_critic()
+                c_status = critic_result.get("status")
+                if c_status not in ("CRITIC_CLEAN", "CRITIC_FINDINGS"):
+                    return self.conclude(
+                        "READY",
+                        c_status,
+                        f"All WorkUnits verified; critic review ended with {c_status}",
+                    )
+                if self.store.state.get("options", {}).get("reviewer", False):
+                    reviewer_result = self.run_reviewer()
+                    r_status = reviewer_result.get("status")
+                    if r_status != "REVIEWER_APPROVED":
+                        return self.conclude(
+                            "READY",
+                            r_status,
+                            f"All WorkUnits verified; senior review ended with {r_status}",
+                        )
+                    final_verif = self.run_final_verification()
+                    if not final_verif.get("passed"):
+                        return self.conclude(
+                            "READY",
+                            "FINAL_VERIFICATION_FAILED",
+                            "Final deterministic verification failed after senior reviewer approval",
+                        )
+                    if self.terminal_acceptance:
+                        return self.finalize_terminal_acceptance(final_verif)
+                    else:
+                        self.validate_acceptance_readiness(final_verif)
+                        self.create_trusted_checkpoint(final_verif)
+                        return self.conclude(
+                            "COMPLETED",
+                            "ALL_CRITERIA_PROVEN",
+                            "All criteria proven; trusted checkpoint established",
+                        )
+                if c_status == "CRITIC_CLEAN":
+                    return self.conclude(
+                        "READY",
+                        "CRITIC_CLEAN",
+                        "All WorkUnits verified; critic review clean with no findings",
+                    )
+                elif c_status == "CRITIC_FINDINGS":
+                    return self.conclude(
+                        "READY",
+                        "CRITIC_FINDINGS",
+                        "All WorkUnits verified; critic reported review findings",
+                    )
+                else:
+                    return self.conclude(
+                        "READY",
+                        c_status,
+                        f"All WorkUnits verified; critic review ended with {c_status}",
+                    )
+            else:
+                if self.store.state.get("options", {}).get("reviewer", False):
+                    reviewer_result = self.run_reviewer()
+                    r_status = reviewer_result.get("status")
+                    if r_status != "REVIEWER_APPROVED":
+                        return self.conclude(
+                            "READY",
+                            r_status,
+                            f"All WorkUnits verified; senior review ended with {r_status}",
+                        )
+                    final_verif = self.run_final_verification()
+                    if not final_verif.get("passed"):
+                        return self.conclude(
+                            "READY",
+                            "FINAL_VERIFICATION_FAILED",
+                            "Final deterministic verification failed after senior reviewer approval",
+                        )
+                    if self.terminal_acceptance:
+                        return self.finalize_terminal_acceptance(final_verif)
+                    else:
+                        self.validate_acceptance_readiness(final_verif)
+                        self.create_trusted_checkpoint(final_verif)
+                        return self.conclude(
+                            "COMPLETED",
+                            "ALL_CRITERIA_PROVEN",
+                            "All criteria proven; trusted checkpoint established",
+                        )
+            return self.conclude(
+                "READY",
+                "MILESTONE_READY",
+                "All WorkUnits verified and revalidated; milestone ready for higher-level verification",
+            )
+        elif status in ("HUMAN_ACTION_REQUIRED", "BUDGET_EXHAUSTED", "STOPPED"):
+            return self.conclude(status, wu_result.get("reason", status), wu_result.get("error"))
+        else:
+            return self.conclude("FAILED", wu_result.get("reason", "WORK_UNITS_FAILED"), wu_result.get("error"))
+
     def run(self):
         try:
+            if self.store.is_terminal_accepted():
+                return write_report(self.store)
             self.guard_children(models_allowed=True)
             # A completed Wave 6 checkpoint is terminal only while its gates stay fresh.
             if (self.store.state.get("work_units")
@@ -1117,10 +1482,14 @@ class ManagerLoop:
                     }
                     if all(checkpoint.get(key) == digest(value) for key, value in bindings.items()):
                         from work_unit_scheduler import capture_fs_snapshot
-                        final = self.store.read_evidence(checkpoint["verification"][-1])
+                        final_ref = checkpoint["verification"][-1]
+                        final = self.store.read_evidence(final_ref)
                         if digest(capture_fs_snapshot(self.repo.root)) != final.get("final_filesystem_snapshot_digest"):
                             raise Stop("HUMAN_ACTION_REQUIRED", "REPOSITORY_DRIFT",
                                        "Candidate filesystem changed since final verification")
+                        if self.terminal_acceptance:
+                            final_verif = {"passed": True, "reference": final_ref, "evidence": final}
+                            return self.finalize_terminal_acceptance(final_verif)
                         self.gateway.unload()
                         self.supervisor.require_idle()
                         if self.supervisor.failure:
@@ -1131,66 +1500,7 @@ class ManagerLoop:
                 self.plan_work_units()
             if self.store.state.get("work_units"):
                 wu_result = self.run_work_units()
-                status = wu_result.get("status")
-                if status in ("MILESTONE_READY", "CRITIC_REVIEWED"):
-                    if self.store.state.get("options", {}).get("critic", False):
-                        critic_result = self.run_critic()
-                        c_status = critic_result.get("status")
-                        if c_status not in ("CRITIC_CLEAN", "CRITIC_FINDINGS"):
-                            return self.conclude(
-                                "READY",
-                                c_status,
-                                f"All WorkUnits verified; critic review ended with {c_status}",
-                            )
-                        if self.store.state.get("options", {}).get("reviewer", False):
-                            reviewer_result = self.run_reviewer()
-                            r_status = reviewer_result.get("status")
-                            if r_status != "REVIEWER_APPROVED":
-                                return self.conclude(
-                                    "READY",
-                                    r_status,
-                                    f"All WorkUnits verified; senior review ended with {r_status}",
-                                )
-                            final_verif = self.run_final_verification()
-                            if not final_verif.get("passed"):
-                                return self.conclude(
-                                    "READY",
-                                    "FINAL_VERIFICATION_FAILED",
-                                    "Final deterministic verification failed after senior reviewer approval",
-                                )
-                            self.create_trusted_checkpoint(final_verif)
-                            return self.conclude(
-                                "COMPLETED",
-                                "ALL_CRITERIA_PROVEN",
-                                "All criteria proven; trusted checkpoint established",
-                            )
-                        if c_status == "CRITIC_CLEAN":
-                            return self.conclude(
-                                "READY",
-                                "CRITIC_CLEAN",
-                                "All WorkUnits verified; critic review clean with no findings",
-                            )
-                        elif c_status == "CRITIC_FINDINGS":
-                            return self.conclude(
-                                "READY",
-                                "CRITIC_FINDINGS",
-                                "All WorkUnits verified; critic reported review findings",
-                            )
-                        else:
-                            return self.conclude(
-                                "READY",
-                                c_status,
-                                f"All WorkUnits verified; critic review ended with {c_status}",
-                            )
-                    return self.conclude(
-                        "READY",
-                        "MILESTONE_READY",
-                        "All WorkUnits verified and revalidated; milestone ready for higher-level verification",
-                    )
-                elif status in ("HUMAN_ACTION_REQUIRED", "BUDGET_EXHAUSTED", "STOPPED"):
-                    return self.conclude(status, wu_result.get("reason", status), wu_result.get("error"))
-                else:
-                    return self.conclude("FAILED", wu_result.get("reason", "WORK_UNITS_FAILED"), wu_result.get("error"))
+                return self.process_work_unit_milestone(wu_result)
             while True:
                 self.guard_children(models_allowed=True)
                 self.guard_environment()
@@ -1924,7 +2234,18 @@ def critic_text(record):
 # ----------------------------------------------------------------------------- reports and status
 
 def write_report(store):
+    report_file = store.directory / "final-report.json"
     state = store.state
+    expected_status = state.get("status")
+    is_terminal = store.is_terminal_accepted()
+    if report_file.exists():
+        try:
+            cached = json.loads(report_file.read_text(encoding="utf-8"))
+            if cached.get("status") == expected_status:
+                if not is_terminal or cached.get("terminal_accepted"):
+                    return cached
+        except Exception:
+            pass
     manager = state["manager"]
     completion = manager["completion"]
     report = {"run_id": state["run_id"], "status": state["status"], "stop": manager["stop"],
@@ -1938,6 +2259,10 @@ def write_report(store):
               "verified_progress": state["verified_progress"],
               "remaining_work": state["remaining_work"], "human_action": (manager["stop"] or {}).get("message")
               if state["status"] == "HUMAN_ACTION_REQUIRED" else None}
+    if is_terminal:
+        term_rec = getattr(store, "terminal_record", {}) or state.get("terminal_acceptance", {})
+        report["terminal_accepted"] = True
+        report["terminal_acceptance"] = term_rec
     store.artifact("final-report.json", report)
     return report
 
@@ -1965,8 +2290,21 @@ def concise_lines(state):
 
 # ----------------------------------------------------------------------------- entry points
 
-def execute(store, *, agents=None, gateway=None, clock=time.monotonic, progress=False):
+def execute(store, *, agents=None, gateway=None, clock=time.monotonic, progress=False, terminal_acceptance=None):
     """Run (or continue) the autonomous loop for a prepared Manager run."""
+    if store.is_terminal_accepted():
+        return write_report(store)
+    effective_terminal = (
+        terminal_acceptance
+        if terminal_acceptance is not None
+        else store.state.get("options", {}).get("terminal_acceptance", False)
+    )
+    if (
+        terminal_acceptance is not None
+        and terminal_acceptance != store.state.get("options", {}).get("terminal_acceptance", False)
+    ):
+        store.commit(options={**store.state["options"], "terminal_acceptance": bool(terminal_acceptance)})
+
     is_work_unit = "work_units" in store.state or "work_unit_planner" in store.state
     if not is_work_unit:
         drift = environment.compare(store.state["environment"], durable.current_fingerprint(store))
@@ -2002,11 +2340,24 @@ def execute(store, *, agents=None, gateway=None, clock=time.monotonic, progress=
             drift = environment.compare(store.state["environment"], durable.current_fingerprint(store))
             if drift["decision"] in {"UNSAFE", "REVALIDATION_REQUIRED"}:
                 raise DurableError("ENVIRONMENT_DRIFT before execution: " + durable.drift_diagnostic(drift))
-        return ManagerLoop(store, supervisor, repo, gateway, agents, log, clock).run()
+        return ManagerLoop(store, supervisor, repo, gateway, agents, log, clock, terminal_acceptance=effective_terminal).run()
 
 
-def execute_work_units(store, *, agents=None, gateway=None, clock=time.monotonic, progress=False, verifier_registry=None):
+def execute_work_units(store, *, agents=None, gateway=None, clock=time.monotonic, progress=False, verifier_registry=None, terminal_acceptance=None):
     """Run WorkUnit sequential scheduling and execution for a prepared run."""
+    if store.is_terminal_accepted():
+        return write_report(store)
+    effective_terminal = (
+        terminal_acceptance
+        if terminal_acceptance is not None
+        else store.state.get("options", {}).get("terminal_acceptance", False)
+    )
+    if (
+        terminal_acceptance is not None
+        and terminal_acceptance != store.state.get("options", {}).get("terminal_acceptance", False)
+    ):
+        store.commit(options={**store.state["options"], "terminal_acceptance": bool(terminal_acceptance)})
+
     with Supervisor(store) as supervisor:
         state = store.state
         config = state["options"]["config"]
@@ -2027,12 +2378,28 @@ def execute_work_units(store, *, agents=None, gateway=None, clock=time.monotonic
         drift = environment.compare(store.state["environment"], durable.current_fingerprint(store))
         if drift["decision"] in {"UNSAFE", "REVALIDATION_REQUIRED"}:
             raise DurableError("ENVIRONMENT_DRIFT before execution: " + durable.drift_diagnostic(drift))
-        loop = ManagerLoop(store, supervisor, repo, gateway, agents, log, clock)
-        return loop.run_work_units(verifier_registry=verifier_registry)
+        loop = ManagerLoop(store, supervisor, repo, gateway, agents, log, clock, terminal_acceptance=effective_terminal)
+        res = loop.run_work_units(verifier_registry=verifier_registry)
+        if effective_terminal and res.get("status") in ("MILESTONE_READY", "CRITIC_REVIEWED"):
+            return loop.process_work_unit_milestone(res)
+        return res
 
 
-def plan_and_execute_work_units(store, planner, *, agents=None, gateway=None, clock=time.monotonic, progress=False, verifier_registry=None, capability_policy=None):
+def plan_and_execute_work_units(store, planner, *, agents=None, gateway=None, clock=time.monotonic, progress=False, verifier_registry=None, capability_policy=None, terminal_acceptance=None):
     """Plan WorkUnits using injected planner and execute through Wave 2 scheduler."""
+    if store.is_terminal_accepted():
+        return write_report(store)
+    effective_terminal = (
+        terminal_acceptance
+        if terminal_acceptance is not None
+        else store.state.get("options", {}).get("terminal_acceptance", False)
+    )
+    if (
+        terminal_acceptance is not None
+        and terminal_acceptance != store.state.get("options", {}).get("terminal_acceptance", False)
+    ):
+        store.commit(options={**store.state["options"], "terminal_acceptance": bool(terminal_acceptance)})
+
     with Supervisor(store) as supervisor:
         state = store.state
         config = state["options"]["config"]
@@ -2053,14 +2420,24 @@ def plan_and_execute_work_units(store, planner, *, agents=None, gateway=None, cl
         drift = environment.compare(store.state["environment"], durable.current_fingerprint(store))
         if drift["decision"] in {"UNSAFE", "REVALIDATION_REQUIRED"}:
             raise DurableError("ENVIRONMENT_DRIFT before execution: " + durable.drift_diagnostic(drift))
-        loop = ManagerLoop(store, supervisor, repo, gateway, agents, log, clock)
+        loop = ManagerLoop(store, supervisor, repo, gateway, agents, log, clock, terminal_acceptance=effective_terminal)
         if not store.state.get("work_units"):
             loop.plan_work_units(planner=planner, verifier_registry=verifier_registry, capability_policy=capability_policy)
-        return loop.run_work_units(verifier_registry=verifier_registry)
+        res = loop.run_work_units(verifier_registry=verifier_registry)
+        if effective_terminal and res.get("status") in ("MILESTONE_READY", "CRITIC_REVIEWED"):
+            return loop.process_work_unit_milestone(res)
+        return res
 
 
-def prepare_resume(store, *, revalidate_environment=False, budgets=None, reviewer=None, executor=None):
+def prepare_resume(store, *, revalidate_environment=False, budgets=None, reviewer=None, executor=None, terminal_acceptance=None):
     """Validate, record the interruption and choose the recovery action. Runs no model or verifier."""
+    if store.is_terminal_accepted():
+        return "completed"
+    if (
+        terminal_acceptance is not None
+        and terminal_acceptance != store.state.get("options", {}).get("terminal_acceptance", False)
+    ):
+        store.commit(options={**store.state["options"], "terminal_acceptance": bool(terminal_acceptance)})
     recorded = store.state.get("options", {}).get("work_unit_executor", {})
     if (executor is None and recorded.get("kind") in {"live", "safe_qwen"}
             and getattr(store, "_effective_work_unit_executor", None) is None):
@@ -2070,6 +2447,8 @@ def prepare_resume(store, *, revalidate_environment=False, budgets=None, reviewe
     state = store.state
     if "manager" not in state:
         raise DurableError("Not an autonomous Manager run; use resume")
+    if store.is_terminal_accepted():
+        return "completed"
     status = state["status"]
     if status == "COMPLETED":
         return "completed"
@@ -2118,8 +2497,8 @@ def prepare_resume(store, *, revalidate_environment=False, budgets=None, reviewe
         record = next(r for r in manager["rounds"] if r["round"] == manager["active_round"])
         phase = manager["phase"]
         reference = store.artifact(f"rounds/{record['round']:04d}/interruption-{uuid.uuid4().hex}.json",
-                                   {"status": status, "phase": phase, "time": now(), "evidence": record["evidence"],
-                                    "reason": "previous_process_ended_without_terminal_state"})
+                                    {"status": status, "phase": phase, "time": now(), "evidence": record["evidence"],
+                                     "reason": "previous_process_ended_without_terminal_state"})
         record.update(outcome="ABANDONED", reason=f"INTERRUPTED_IN_{phase}", trusted=False, interruption=reference)
         interrupted = {"round": record["round"], "phase": phase, "step_reference": record["step_reference"]}
         manager.update(active_round=None, phase="READY")
@@ -2155,7 +2534,9 @@ def prepare_resume(store, *, revalidate_environment=False, budgets=None, reviewe
 
 def resume(store, **kwargs):
     progress = kwargs.pop("progress", False)
-    execute_options = {k: kwargs.pop(k) for k in ("agents", "gateway", "clock") if k in kwargs}
+    execute_options = {k: kwargs.pop(k) for k in ("agents", "gateway", "clock", "terminal_acceptance") if k in kwargs}
+    if "terminal_acceptance" in execute_options and execute_options["terminal_acceptance"] is not None:
+        kwargs["terminal_acceptance"] = execute_options["terminal_acceptance"]
     if prepare_resume(store, **kwargs) == "completed":
         return write_report(store)
     return execute(store, progress=progress, **execute_options)

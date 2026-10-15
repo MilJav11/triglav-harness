@@ -36,5 +36,13 @@
     "supervision.py": "6bbe3404254fc1b43a564b5c6ce3d5c6d6d59f05fc602e27e380b925ee48b426",
     "winprocess.py": "78dcda141a1bcad90150b518816eb72d931aa8cd5aab321906f167183fd9e220"
   },
-  "phase_2b_3_scope": "Native HotPin reviewer enforcement with offline fake processes/handles only; no live qualification."
+  "phase_2b_3_scope": "Native HotPin reviewer enforcement with offline fake processes/handles only; no live qualification.",
+  "multi_work_unit_sha256": {
+    "safe_qwen_worker.py": "7fb0d082c1fe3a93a200b6168d54421daad42ceb77d39d1f3ab2fff9e91bd26f",
+    "tool_protocol.py": "489b8c238ea335508d3647a7fd9eba1b17acf8f68e346ff19e43b0c3ba318c2a",
+    "integration_shim.py": "c84222faff1b634efd925dc8e1a616aaa212d2fa7326a74e955fb29673b1cd4b",
+    "safe_executor_binding.py": "de5746ff7e4693a4639ef4ba5ba9d2ecb1f5dfd8b139302ef9635df94a3c8aa1",
+    "terminal_run.py": "ee7b78fb528c11d4d3b8d93c1fa6c98ee621f00fe36c975a07fb423fb4ef39d1"
+  },
+  "multi_work_unit_scope": "Opt-in SafeQwen multi-unit execution; permits exactly two explicitly registered WorkUnits bound to durable run plan."
 }

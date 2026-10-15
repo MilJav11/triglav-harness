@@ -105,6 +105,127 @@ def fixed_unit(task, cfg, worker, verifier_ids):
             "limits": {"max_attempts": 1, "timeout_seconds": data["unit_timeout_seconds"]}}
 
 
+def fixed_two_units(task1, vids1, task2, vids2, cfg, worker, *, id1="unit-1-multiply", id2="unit-2-scale"):
+    data = cfg["safe_qwen_policy"]
+    timeout = data["unit_timeout_seconds"]
+    scope = {
+        "allowed_paths": list(worker.policy.writable if data["mode"] == "mutation" else worker.policy.readable),
+        "forbidden_paths": list(worker.policy.frozen if data["mode"] == "mutation" else []),
+    }
+    unit1 = {
+        "unit_id": id1,
+        "objective": task1,
+        "dependencies": [],
+        "mode": data["mode"],
+        "scope": copy.deepcopy(scope),
+        "verifier_ids": list(vids1),
+        "evidence_inputs": [],
+        "limits": {"max_attempts": 1, "timeout_seconds": timeout},
+    }
+    unit2 = {
+        "unit_id": id2,
+        "objective": task2,
+        "dependencies": [id1],
+        "mode": data["mode"],
+        "scope": copy.deepcopy(scope),
+        "verifier_ids": list(vids2),
+        "evidence_inputs": [],
+        "limits": {"max_attempts": 1, "timeout_seconds": timeout},
+    }
+    return [unit1, unit2]
+
+
+def validate_safe_qwen_unit_contract(unit_spec, cfg, worker, store=None):
+    from manager import ExecutorError
+    if not cfg.get("multi_work_unit"):
+        expected = fixed_unit(unit_spec.get("objective"), cfg, worker, unit_spec.get("verifier_ids"))
+        if (unit_spec.get("unit_id") != expected["unit_id"] or unit_spec.get("mode") != expected["mode"]
+                or unit_spec.get("limits") != expected["limits"]
+                or any(sorted(unit_spec.get("scope", {}).get(key, [])) != sorted(expected["scope"][key])
+                       for key in ("allowed_paths", "forbidden_paths"))):
+            raise ExecutorError("SafeQwen fixed WorkUnit contract mismatch", "CONTRACT_MISMATCH")
+        return
+
+    import durable
+    if not isinstance(store, durable.Store):
+        raise ExecutorError("SafeQwen multi-unit execution requires genuine durable Store authority", "CONTRACT_MISMATCH")
+    store_dir = getattr(store, "directory", None)
+    if not isinstance(store_dir, Path) or not store_dir.is_dir():
+        raise ExecutorError("SafeQwen multi-unit execution requires valid Store directory", "CONTRACT_MISMATCH")
+    run_id = store_dir.name
+    if not isinstance(store.state, dict) or store.state.get("run_id") != run_id:
+        raise ExecutorError("Store run identity mismatch", "CONTRACT_MISMATCH")
+    if store.state.get("target_repository") != str(worker.policy.root):
+        raise ExecutorError("Store repository binding mismatch", "CONTRACT_MISMATCH")
+
+    try:
+        auth_store = durable.Store(store_dir.parent, run_id)
+        auth_store.load()
+    except Exception as exc:
+        raise ExecutorError(f"Durable Store load/WAL validation failed: {exc}", "CONTRACT_MISMATCH") from exc
+
+    if durable.encoded(store.state) != durable.encoded(auth_store.state):
+        raise ExecutorError("In-memory store state disagrees with durable WAL authority", "CONTRACT_MISMATCH")
+    if len(store.records) != len(auth_store.records) or (store.records and store.records[-1]["sha256"] != auth_store.records[-1]["sha256"]):
+        raise ExecutorError("In-memory store records disagree with durable WAL ledger", "CONTRACT_MISMATCH")
+
+    wu_section = auth_store.state.get("work_units")
+    if not isinstance(wu_section, dict):
+        raise ExecutorError("SafeQwen multi-unit execution requires registered work_units in Store", "CONTRACT_MISMATCH")
+    sequence = wu_section.get("sequence", [])
+    if len(sequence) != 2 or len(set(sequence)) != 2:
+        raise ExecutorError("SafeQwen multi-unit mode requires exactly two distinct registered units", "CONTRACT_MISMATCH")
+    uid = unit_spec.get("unit_id")
+    if uid not in sequence:
+        raise ExecutorError(f"SafeQwen unit {uid!r} is not in authorized run sequence", "CONTRACT_MISMATCH")
+
+    registered_unit = wu_section.get("units", {}).get(uid)
+    if not registered_unit or not registered_unit.get("spec"):
+        raise ExecutorError(f"SafeQwen unit {uid!r} missing spec in run plan", "CONTRACT_MISMATCH")
+    planned = registered_unit["spec"]
+
+    limits = unit_spec.get("limits", {})
+    if limits.get("max_attempts") != 1:
+        raise ExecutorError("SafeQwen units limited to single attempt (max_attempts=1)", "CONTRACT_MISMATCH")
+    data = cfg.get("safe_qwen_policy", {})
+    if limits.get("timeout_seconds", 0) > data.get("unit_timeout_seconds", 600):
+        raise ExecutorError("SafeQwen unit timeout exceeds policy deadline", "CONTRACT_MISMATCH")
+
+    if (unit_spec.get("objective") != planned.get("objective")
+            or unit_spec.get("mode") != planned.get("mode")
+            or unit_spec.get("dependencies") != planned.get("dependencies")
+            or unit_spec.get("verifier_ids") != planned.get("verifier_ids")
+            or unit_spec.get("limits") != planned.get("limits")
+            or sorted(unit_spec.get("scope", {}).get("allowed_paths", [])) != sorted(planned.get("scope", {}).get("allowed_paths", []))
+            or sorted(unit_spec.get("scope", {}).get("forbidden_paths", [])) != sorted(planned.get("scope", {}).get("forbidden_paths", []))):
+        raise ExecutorError("SafeQwen WorkUnit spec mismatch against authorized run plan", "CONTRACT_MISMATCH")
+
+    if unit_spec.get("mode") != data.get("mode"):
+        raise ExecutorError("SafeQwen unit mode mismatch with policy", "CONTRACT_MISMATCH")
+    allowed = unit_spec.get("scope", {}).get("allowed_paths", [])
+    forbidden = unit_spec.get("scope", {}).get("forbidden_paths", [])
+    expected_allowed = worker.policy.writable if data.get("mode") == "mutation" else worker.policy.readable
+    if not set(allowed).issubset(set(expected_allowed)):
+        raise ExecutorError("SafeQwen unit allowed paths exceed worker policy scope", "CONTRACT_MISMATCH")
+    if not set(worker.policy.frozen).issubset(set(forbidden)):
+        raise ExecutorError("SafeQwen unit unfreezes worker policy frozen paths", "CONTRACT_MISMATCH")
+
+    if uid == sequence[0]:
+        if unit_spec.get("dependencies") != []:
+            raise ExecutorError("First SafeQwen unit must have empty dependencies", "CONTRACT_MISMATCH")
+    elif uid == sequence[1]:
+        if unit_spec.get("dependencies") != [sequence[0]]:
+            raise ExecutorError(f"Second SafeQwen unit must depend strictly on {sequence[0]!r}", "CONTRACT_MISMATCH")
+        prereq = wu_section.get("units", {}).get(sequence[0])
+        if not prereq or prereq.get("status") != "UNIT_VERIFIED":
+            raise ExecutorError(f"Prerequisite unit {sequence[0]!r} must be UNIT_VERIFIED in durable state before {uid!r} execution", "CONTRACT_MISMATCH")
+
+    v_registry = auth_store.state.get("verifier_registry") or auth_store.state.get("options", {}).get("verifier_registry") or {}
+    vids = unit_spec.get("verifier_ids", [])
+    if not vids or not all(vid in v_registry for vid in vids):
+        raise ExecutorError("SafeQwen unit verifier IDs must be registered in verifier registry", "CONTRACT_MISMATCH")
+
+
 def agents_factory(worker):
     def factory(repo, gateway, cfg, log):
         from manager import Agents

@@ -60,13 +60,13 @@ Controller-owned scope and verifier checks precede reviews. Critic findings are 
 - Tests can execute malicious imports, subprocesses or network effects. `shell=False` and an approved Python command do not sandbox Python code. Windows verifier Job Objects help supervise process lifetime; they do not isolate filesystem or network access.
 - Exclusive controller ownership is assumed. Path/hash rechecks reduce stale edits but do not eliminate adversarial TOCTOU swaps or another process mutating files concurrently. The launcher lock does not constrain unrelated processes.
 - Atomic replacement does not promise complete ACL/alternate-stream preservation or directory-fsync durability on every filesystem. A crash can leave a generated temporary file or an unmatched audit intent. Storage failure can prevent evidence retention.
-- The historical external in-memory identity hooks were not a generic plugin API. Phase 8A replaces them with direct binding; concurrency, filesystem races and intermediate recovery restrictions remain described in the current integration guide.
+- Terminal acceptance seals (`acceptance/term-*.json`) and pre-write publication guards strictly enforce pre-write Store revision, WAL sequence, and repository snapshot invariants under `store.mutex`, but cannot prevent external OS-level file modification outside the controller.
 - Review packets are bounded. Current candidate diff evidence is capped at 6,000 characters and 32 changed files; incomplete code evidence cannot establish new trust. Reviewers can still miss defects in complete packets.
-- The successful evidence covers small supervised fixtures. Multi-unit live planning, unattended repair campaigns, concurrent tasks, large-repository reliability, cross-host restoration and every crash/reboot window are unverified.
+- Live qualification is bounded to two dependent WorkUnits (Live Run 002). Live error-driven repair/re-planning campaigns, multi-round automatic recovery after failed units, safe mid-inference interruption and resume, and campaigns beyond two units remain unverified.
 - Delegated model ownership can become ambiguous. Do not infer process identity from PID alone or terminate unrelated processes. Dedicated gateway ownership matters because unloading affects models on that instance.
 - The reserved deep/WSL path is not qualified for automatic execution; explicit tested child termination would be needed.
 - UTF-8 existing-file constraints exclude normal creation, binary editing and broad refactors. Manual schema/validator consistency remains a maintenance responsibility.
-- Manager criteria/counters disagree with the WorkUnit completion label, and cleanup fields have the qualifications described in [ARCHITECTURE.md](ARCHITECTURE.md) and [QUALIFICATION.md](QUALIFICATION.md).
+- Manager criteria/counters in `final-report.json` report `NOT_PROVEN` and `completion: null` due to legacy `check_completion()` serialization, while the authoritative Store WAL and terminal seal record `ALL_CRITERIA_PROVEN` and `COMPLETED`.
 
 [L01–L06, S02–S04](EVIDENCE_SUMMARY.md#claim-map)
 

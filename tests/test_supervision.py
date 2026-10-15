@@ -944,5 +944,548 @@ class ModelRecoveryTests(unittest.TestCase):
                           "--resolution", "assume_safe", "--reason", "why"])
 
 
+class SupervisorLifecycleTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.store = MemoryStore()
+        self.clock = Mock(return_value=100)
+        self.boot = Mock(return_value="boot-a")
+        self.inspect = Mock(return_value=IDENTITY)
+
+    def supervisor(self):
+        return s.Supervisor(self.store, self.clock, self.boot, self.inspect)
+
+    def test_normal_supervisor_closure(self):
+        sup = self.supervisor()
+        self.assertFalse(sup.entered)
+        self.assertFalse(sup.closed)
+        with sup:
+            self.assertTrue(sup.entered)
+            self.assertFalse(sup.closed)
+            self.assertTrue(sup.thread.is_alive())
+        self.assertTrue(sup.closed)
+        self.assertFalse(sup.thread.is_alive())
+        self.assertIsNone(sup.failure)
+
+    def test_explicit_shutdown_followed_by_exit(self):
+        sup = self.supervisor()
+        with sup:
+            sup.shutdown()
+            self.assertTrue(sup.closed)
+            self.assertFalse(sup.thread.is_alive())
+        self.assertTrue(sup.closed)
+
+    def test_repeated_shutdown(self):
+        sup = self.supervisor()
+        with sup:
+            sup.shutdown()
+            self.assertTrue(sup.closed)
+            sup.shutdown()
+            self.assertTrue(sup.closed)
+        sup.shutdown()
+        self.assertTrue(sup.closed)
+
+    def test_heartbeat_thread_actually_stopped(self):
+        sup = self.supervisor()
+        with sup:
+            thread = sup.thread
+            self.assertTrue(thread.is_alive())
+            self.assertFalse(sup.stop_event.is_set())
+        self.assertFalse(thread.is_alive())
+        self.assertTrue(sup.stop_event.is_set())
+        self.assertTrue(sup.closed)
+
+    def test_heartbeat_failure_latch(self):
+        sup = self.supervisor()
+        with self.assertRaisesRegex(RuntimeError, "Supervision heartbeat persistence failed") as cm_exit:
+            with sup:
+                sup.failure = OSError("disk full")
+                with self.assertRaisesRegex(RuntimeError, "Supervision heartbeat persistence failed") as cm:
+                    sup.shutdown()
+                self.assertIs(cm.exception.__cause__, sup.failure)
+        self.assertIs(cm_exit.exception.__cause__, sup.failure)
+        self.assertFalse(sup.closed)
+
+        sup2 = self.supervisor()
+        with self.assertRaisesRegex(RuntimeError, "Supervision heartbeat persistence failed") as cm2:
+            with sup2:
+                sup2.failure = OSError("disk full 2")
+        self.assertIs(cm2.exception.__cause__, sup2.failure)
+        self.assertFalse(sup2.closed)
+
+    def test_shutdown_failure(self):
+        sup = self.supervisor()
+        sup.__enter__()
+        with patch.object(sup.thread, "is_alive", return_value=True):
+            with self.assertRaisesRegex(RuntimeError, "Supervision heartbeat persistence failed"):
+                sup.shutdown(timeout=0.01)
+        self.assertFalse(sup.closed)
+        self.assertIsNotNone(sup.failure)
+        self.assertIn("failed to stop", str(sup.failure))
+        sup.stop_event.set()
+        sup.thread.join(timeout=1.0)
+
+    def test_unentered_supervisor(self):
+        sup = self.supervisor()
+        self.assertFalse(sup.entered)
+        self.assertFalse(sup.closed)
+        with self.assertRaisesRegex(RuntimeError, "not entered"):
+            sup.shutdown()
+        self.assertFalse(sup.closed)
+        with self.assertRaisesRegex(RuntimeError, "not entered"):
+            sup.__exit__(None, None, None)
+        self.assertFalse(sup.closed)
+
+    def test_active_supervised_child(self):
+        sup = self.supervisor()
+        child_id = sup.register("model_server", sys.executable, [], "delegated")
+        child = sup.child(child_id)
+        child.update(parent_pid=5, parent_identity=IDENTITY, alias="llm-code")
+        sup.change("model_launch_intent", child)
+        sup.model_observed(child_id, [{"pid": 42, "parent_pid": 5}])
+        self.assertEqual(sup.child(child_id)["state"], "RUNNING")
+        with patch("winprocess.terminate_owned_job") as kill:
+            with sup:
+                pass
+            kill.assert_not_called()
+        self.assertTrue(sup.closed)
+        self.assertEqual(sup.child(child_id)["state"], "RUNNING")
+        with self.assertRaises(durable.DurableError):
+            sup.require_idle()
+
+    def test_exception_raised_inside_context(self):
+        sup = self.supervisor()
+        with self.assertRaises(ValueError) as ctx:
+            with sup:
+                raise ValueError("body failure")
+        self.assertEqual(str(ctx.exception), "body failure")
+        self.assertTrue(sup.closed)
+        self.assertIsNone(sup.failure)
+        self.assertFalse(sup.thread.is_alive())
+
+    def test_original_error_plus_cleanup_error(self):
+        sup = self.supervisor()
+        latch_err = OSError("disk full")
+        with self.assertRaises(ValueError) as ctx:
+            with sup:
+                sup.failure = latch_err
+                raise ValueError("original body failure")
+        self.assertEqual(str(ctx.exception), "original body failure")
+        self.assertIs(sup.failure, latch_err)
+        self.assertFalse(sup.closed)
+        self.assertIs(getattr(ctx.exception, "cleanup_error", None), latch_err)
+
+    def test_failed_shutdown_followed_by_context_exit_raises_unresolved_failure(self):
+        sup = self.supervisor()
+        with self.assertRaisesRegex(RuntimeError, "Supervision heartbeat persistence failed"):
+            with sup:
+                sup.failure = OSError("disk failure")
+                try:
+                    sup.shutdown()
+                except RuntimeError:
+                    pass
+        self.assertFalse(sup.closed)
+        self.assertIsNotNone(sup.failure)
+        with self.assertRaisesRegex(RuntimeError, "Supervision heartbeat persistence failed"):
+            sup.shutdown()
+
+    def test_join_exception_preserves_body_exception(self):
+        sup = self.supervisor()
+        sup.__enter__()
+        body_exc = ValueError("primary body error")
+        with self.assertRaises(ValueError) as ctx:
+            with patch.object(sup.thread, "join", side_effect=OSError("join error")):
+                try:
+                    raise body_exc
+                finally:
+                    sup.__exit__(ValueError, body_exc, None)
+        self.assertIs(ctx.exception, body_exc)
+        self.assertEqual(str(ctx.exception), "primary body error")
+        self.assertIsInstance(getattr(ctx.exception, "cleanup_error", None), OSError)
+        self.assertFalse(sup.closed)
+        self.assertIsInstance(sup.failure, OSError)
+        sup.stop_event.set()
+        sup.thread.join(timeout=1.0)
+
+    def test_is_alive_exception_preserves_body_exception(self):
+        sup = self.supervisor()
+        sup.__enter__()
+        body_exc = ValueError("primary body error")
+        with self.assertRaises(ValueError) as ctx:
+            with patch.object(sup.thread, "is_alive", side_effect=RuntimeError("is_alive error")):
+                try:
+                    raise body_exc
+                finally:
+                    sup.__exit__(ValueError, body_exc, None)
+        self.assertIs(ctx.exception, body_exc)
+        self.assertEqual(str(ctx.exception), "primary body error")
+        self.assertIsInstance(getattr(ctx.exception, "cleanup_error", None), RuntimeError)
+        self.assertFalse(sup.closed)
+        self.assertIsInstance(sup.failure, RuntimeError)
+        sup.stop_event.set()
+        sup.thread.join(timeout=1.0)
+
+    def test_join_exception_without_body_exception_propagates(self):
+        sup = self.supervisor()
+        sup.__enter__()
+        with patch.object(sup.thread, "join", side_effect=OSError("join failed")):
+            with self.assertRaisesRegex(RuntimeError, "Supervision heartbeat persistence failed") as ctx:
+                sup.shutdown()
+        self.assertIsInstance(ctx.exception.__cause__, OSError)
+        self.assertFalse(sup.closed)
+        sup.stop_event.set()
+        sup.thread.join(timeout=1.0)
+
+    def test_in_flight_heartbeat_shutdown_timeout(self):
+        sup = self.supervisor()
+        sup._pulse_interval = 0.01
+        hb_started = threading.Event()
+        hb_release = threading.Event()
+
+        sup.__enter__()
+
+        def in_flight_heartbeat():
+            hb_started.set()
+            hb_release.wait(timeout=2.0)
+
+        sup.heartbeat = in_flight_heartbeat
+
+        self.assertTrue(hb_started.wait(timeout=1.0))
+
+        with self.assertRaisesRegex(RuntimeError, "Supervision heartbeat persistence failed"):
+            sup.shutdown(timeout=0.05)
+
+        self.assertFalse(sup.closed)
+        self.assertIsNotNone(sup.failure)
+        self.assertIn("failed to stop", str(sup.failure))
+
+        hb_release.set()
+        sup.thread.join(timeout=1.0)
+        self.assertFalse(sup.thread.is_alive())
+        self.assertFalse(sup.closed)
+
+    def test_in_flight_heartbeat_timeout_preserves_prior_failure(self):
+        sup = self.supervisor()
+        prior_error = OSError("prior persistence failure")
+        sup.__enter__()
+        sup._record_failure(prior_error)
+        with patch.object(sup.thread, "is_alive", return_value=True):
+            with self.assertRaisesRegex(RuntimeError, "Supervision heartbeat persistence failed") as ctx:
+                sup.shutdown(timeout=0.01)
+            self.assertIs(ctx.exception.__cause__, prior_error)
+        self.assertIs(sup.failure, prior_error)
+        self.assertEqual(len(sup.failures), 2)
+        self.assertIn("failed to stop", str(sup.failures[1]))
+        self.assertFalse(sup.closed)
+        sup.stop_event.set()
+        sup.thread.join(timeout=1.0)
+
+    def test_partial_enter_initial_heartbeat_failure(self):
+        sup = self.supervisor()
+        with patch.object(sup, "heartbeat", side_effect=OSError("initial heartbeat failed")):
+            with self.assertRaises(OSError):
+                sup.__enter__()
+        self.assertFalse(sup.entered)
+        self.assertFalse(sup.closed)
+        self.assertIsNone(sup.thread)
+        with self.assertRaisesRegex(RuntimeError, "not entered"):
+            sup.shutdown()
+
+    def test_partial_enter_thread_construction_failure(self):
+        sup = self.supervisor()
+        with patch("threading.Thread", side_effect=RuntimeError("cannot create thread")):
+            with self.assertRaises(RuntimeError):
+                sup.__enter__()
+        self.assertFalse(sup.entered)
+        self.assertFalse(sup.closed)
+        self.assertIsNone(sup.thread)
+        with self.assertRaisesRegex(RuntimeError, "not entered"):
+            sup.shutdown()
+
+    def test_partial_enter_thread_start_failure(self):
+        # Regression D: Startup fails before native launch
+        sup = self.supervisor()
+        start_err = RuntimeError("thread start failed")
+        with patch.object(threading.Thread, "start", side_effect=start_err):
+            with self.assertRaises(RuntimeError) as ctx:
+                sup.__enter__()
+        self.assertIs(ctx.exception, start_err)
+        self.assertFalse(sup.entered)
+        self.assertFalse(sup.closed)
+        self.assertIsNotNone(sup.thread)
+        self.assertEqual(sup.state, "startup_failed_uncertain")
+        self.assertIs(sup.failure, start_err)
+        # Rejected re-entry
+        with self.assertRaisesRegex(RuntimeError, "cannot be re-entered"):
+            sup.__enter__()
+        # Assert no join of an unstarted thread
+        with patch.object(sup.thread, "join") as mock_join:
+            with self.assertRaisesRegex(RuntimeError, "Supervision heartbeat persistence failed"):
+                sup.shutdown()
+            mock_join.assert_not_called()
+        self.assertFalse(sup.closed)
+
+    def test_startup_failure_after_thread_launch_retains_thread_and_prevents_reentry(self):
+        sup = self.supervisor()
+        sup._startup_cleanup_timeout = 0.05
+        sup._pulse_interval = 0.01
+
+        hb_started = threading.Event()
+        hb_release = threading.Event()
+
+        def in_flight_heartbeat():
+            hb_started.set()
+            hb_release.wait(timeout=2.0)
+
+        orig_heartbeat = sup.heartbeat
+        def hooked_heartbeat():
+            if threading.current_thread() is threading.main_thread():
+                orig_heartbeat()
+            else:
+                in_flight_heartbeat()
+
+        sup.heartbeat = hooked_heartbeat
+
+        orig_thread_init = threading.Thread
+        start_error = RuntimeError("injected start failure after launch")
+
+        def thread_factory(*args, **kwargs):
+            t = orig_thread_init(*args, **kwargs)
+            orig_start = t.start
+            def wrapped_start():
+                orig_start()
+                self.assertTrue(hb_started.wait(timeout=1.0))
+                raise start_error
+            t.start = wrapped_start
+            return t
+
+        with patch("threading.Thread", side_effect=thread_factory):
+            with self.assertRaises(RuntimeError) as ctx:
+                sup.__enter__()
+
+        # Original exception preserved
+        self.assertIs(ctx.exception, start_error)
+        self.assertIs(sup.failure, start_error)
+
+        # Thread reference retained while alive
+        self.assertIsNotNone(sup.thread)
+        self.assertTrue(sup.thread.is_alive())
+
+        # entered=False, closed=False, stop_event signaled
+        self.assertFalse(sup.entered)
+        self.assertFalse(sup.closed)
+        self.assertTrue(sup.stop_event.is_set())
+
+        # No premature re-entry while heartbeat thread is active
+        with self.assertRaisesRegex(RuntimeError, "cannot be re-entered"):
+            sup.__enter__()
+
+        # Release in-flight heartbeat and perform controlled cleanup retry
+        hb_release.set()
+
+        # Controlled cleanup retry must remain possible even if __enter__ never completed
+        with self.assertRaisesRegex(RuntimeError, "Supervision heartbeat persistence failed") as cleanup_ctx:
+            sup.shutdown(timeout=1.0)
+        self.assertIs(cleanup_ctx.exception.__cause__, start_error)
+        self.assertFalse(sup.thread.is_alive())
+        self.assertFalse(sup.closed)
+
+    def test_exception_with_raising_eq_preserves_body_exception_and_retains_secondary_failures(self):
+        class EvilEqException(Exception):
+            def __eq__(self, other):
+                raise RuntimeError("evil __eq__ invoked")
+
+        sup = self.supervisor()
+        sup.__enter__()
+        body_exc = EvilEqException("body evil eq")
+        cleanup_exc = OSError("cleanup join failure")
+
+        with self.assertRaises(EvilEqException) as ctx:
+            with patch.object(sup.thread, "join", side_effect=cleanup_exc):
+                try:
+                    raise body_exc
+                finally:
+                    sup.__exit__(EvilEqException, body_exc, None)
+
+        # C. Verify original body error identity
+        self.assertIs(ctx.exception, body_exc)
+        # D. Verify retained secondary failures
+        self.assertIs(getattr(ctx.exception, "cleanup_error", None), cleanup_exc)
+        self.assertIn(cleanup_exc, getattr(ctx.exception, "cleanup_failures", []))
+        self.assertIs(sup.failure, cleanup_exc)
+        # E. Verify closed=False and proper propagation
+        self.assertFalse(sup.closed)
+        sup.stop_event.set()
+        sup.thread.join(timeout=1.0)
+
+    def test_exception_with_falsy_bool_in_heartbeat_failure_fails_closed_and_propagates(self):
+        class FalsyException(Exception):
+            def __bool__(self):
+                return False
+
+        sup = self.supervisor()
+        falsy_err = FalsyException("falsy heartbeat failure")
+        self.assertFalse(bool(falsy_err))
+
+        with self.assertRaisesRegex(RuntimeError, "Supervision heartbeat persistence failed") as ctx:
+            with sup:
+                sup.failure = falsy_err
+
+        # E. Verify closed=False and proper propagation
+        self.assertIs(ctx.exception.__cause__, falsy_err)
+        self.assertFalse(sup.closed)
+        self.assertIs(sup.failure, falsy_err)
+
+    def test_exception_with_falsy_bool_in_body_and_cleanup_error_preserves_identity(self):
+        class FalsyException(Exception):
+            def __bool__(self):
+                return False
+
+        sup = self.supervisor()
+        sup.__enter__()
+        body_exc = FalsyException("falsy body exception")
+        cleanup_exc = RuntimeError("heartbeat cleanup failure")
+        self.assertFalse(bool(body_exc))
+
+        with self.assertRaises(FalsyException) as ctx:
+            with patch.object(sup.thread, "join", side_effect=cleanup_exc):
+                try:
+                    raise body_exc
+                finally:
+                    sup.__exit__(FalsyException, body_exc, None)
+
+        # C. Verify original body error identity
+        self.assertIs(ctx.exception, body_exc)
+        # D. Verify retained secondary failures
+        self.assertIs(getattr(ctx.exception, "cleanup_error", None), cleanup_exc)
+        # E. Verify closed=False
+        self.assertFalse(sup.closed)
+        self.assertIs(sup.failure, cleanup_exc)
+        sup.stop_event.set()
+        sup.thread.join(timeout=1.0)
+
+    def test_startup_race_worker_delayed_before_started_retains_thread_ownership(self):
+        # Regressions A, B, C
+        sup = self.supervisor()
+        sup._startup_cleanup_timeout = 0.05
+        sup._pulse_interval = 0.01
+
+        native_launched = threading.Event()
+        bootstrap_release = threading.Event()
+        start_wait_failed = RuntimeError("startup wait failed")
+
+        orig_thread_init = threading.Thread
+
+        def thread_factory(*args, **kwargs):
+            t = orig_thread_init(*args, **kwargs)
+
+            orig_set_ident = t._set_ident
+            def hooked_set_ident():
+                native_launched.set()
+                bootstrap_release.wait(timeout=2.0)
+                return orig_set_ident()
+            t._set_ident = hooked_set_ident
+
+            def hooked_started_wait(timeout=None):
+                self.assertTrue(native_launched.wait(timeout=1.0))
+                # Regression A: Ensure CPython _limbo contains no evidence
+                if hasattr(threading, "_limbo"):
+                    threading._limbo.pop(t, None)
+                self.assertFalse(t._started.is_set())
+                raise start_wait_failed
+            t._started.wait = hooked_started_wait
+            return t
+
+        try:
+            with patch("threading.Thread", side_effect=thread_factory):
+                with self.assertRaises(RuntimeError) as ctx:
+                    sup.__enter__()
+
+            # Regression A Assertions:
+            # Original startup exception preserved
+            self.assertIs(ctx.exception, start_wait_failed)
+            self.assertIs(sup.failure, start_wait_failed)
+            # Supervisor retains thread ownership
+            self.assertIsNotNone(sup.thread)
+            self.assertEqual(sup.state, "startup_failed_uncertain")
+            self.assertFalse(sup.entered)
+            self.assertFalse(sup.closed)
+            self.assertTrue(sup.stop_event.is_set())
+            # Rejected re-entry
+            with self.assertRaisesRegex(RuntimeError, "cannot be re-entered"):
+                sup.__enter__()
+
+            # Regression B: Cleanup attempted before worker acknowledges startup
+            self.assertFalse(sup.worker_started.is_set())
+            with patch.object(sup.thread, "join") as mock_join:
+                with self.assertRaisesRegex(RuntimeError, "Supervision heartbeat persistence failed"):
+                    sup.shutdown(timeout=0.05)
+                # No unsafe join
+                mock_join.assert_not_called()
+            # No lost ownership, no false termination claim
+            self.assertIsNotNone(sup.thread)
+            self.assertFalse(sup.closed)
+
+            # Regression C: Release bootstrap and allow worker to acknowledge startup
+            if hasattr(threading, "_limbo"):
+                threading._limbo[sup.thread] = sup.thread
+            bootstrap_release.set()
+            self.assertTrue(sup.worker_started.wait(timeout=1.0))
+
+            # Bounded cleanup succeeds, positive worker completion evidence, no orphan
+            with self.assertRaisesRegex(RuntimeError, "Supervision heartbeat persistence failed") as cleanup_ctx:
+                sup.shutdown(timeout=1.0)
+            self.assertIs(cleanup_ctx.exception.__cause__, start_wait_failed)
+            self.assertFalse(sup.thread.is_alive())
+            self.assertFalse(sup.closed)
+        finally:
+            if hasattr(threading, "_limbo") and sup.thread is not None:
+                threading._limbo.setdefault(sup.thread, sup.thread)
+            bootstrap_release.set()
+            if sup.thread is not None and sup.thread.is_alive():
+                sup.thread.join(timeout=1.0)
+
+    def test_body_exception_with_raising_add_note_lookup_is_preserved_as_primary(self):
+        class EvilAddNoteException(Exception):
+            @property
+            def add_note(self):
+                raise RuntimeError("boom during add_note lookup")
+
+        sup = self.supervisor()
+        sup.__enter__()
+        body_exc = EvilAddNoteException("primary body error")
+        cleanup_exc = OSError("cleanup join failure")
+
+        with self.assertRaises(EvilAddNoteException) as ctx:
+            with patch.object(sup.thread, "join", side_effect=cleanup_exc):
+                try:
+                    raise body_exc
+                finally:
+                    sup.__exit__(EvilAddNoteException, body_exc, None)
+
+        # Original body exception survives by object identity
+        self.assertIs(ctx.exception, body_exc)
+        self.assertEqual(str(ctx.exception), "primary body error")
+
+        # Cleanup failure remains recorded
+        self.assertIs(getattr(ctx.exception, "cleanup_error", None), cleanup_exc)
+        self.assertIn(cleanup_exc, getattr(ctx.exception, "cleanup_failures", []))
+        self.assertIs(sup.failure, cleanup_exc)
+
+        # closed=False
+        self.assertFalse(sup.closed)
+
+        # Subsequent shutdown preserves unresolved failure semantics
+        with self.assertRaisesRegex(RuntimeError, "Supervision heartbeat persistence failed"):
+            sup.shutdown()
+        self.assertFalse(sup.closed)
+
+        # Optional note failure does not become the primary exception
+        self.assertNotIsInstance(ctx.exception, RuntimeError)
+        sup.stop_event.set()
+        sup.thread.join(timeout=1.0)
+
+
 if __name__ == "__main__":
     unittest.main()

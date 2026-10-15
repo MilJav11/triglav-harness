@@ -4,3 +4,4 @@ tool_protocol.py text eol=lf
 integration_shim.py text eol=lf
 terminal_run.py text eol=lf
 safe_executor_binding.py text eol=lf
+tests/fixtures/live002/*.py text eol=lf

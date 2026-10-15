@@ -1681,6 +1681,98 @@ class ExplicitThreeModelTests(ManagerCase):
         self.assertFalse(self.rounds()[0]["trusted"])
         self.assertIsNone(self.state()["last_verified_checkpoint"])
 
+    def test_bounded_multistep_autonomy_with_recovery_and_resume(self):
+        # Target Phase 3B.1 integrated scenario:
+        # 1. Bounded two-step task with three-model review policy.
+        # 2. Step 1 modifies disposable Git fixture, passes deterministic verification,
+        #    passes critic and reviewer gates, and persists Checkpoint 1.
+        # 3. Process is interrupted before Step 2 completes; durable state remains on disk.
+        # 4. Production resume path reconciles repository, environment, and supervisor.
+        # 5. Controller continues outstanding work without repeating Step 1.
+        # 6. Step 2 begins, initially fails deterministic verification, triggers evidence-driven replanning.
+        # 7. Corrected Step 2 passes verification and review gates, persisting Checkpoint 2.
+        # 8. All criteria proven; final report records complete evidence trace.
+        store = self.make(TWO, TWO_CRITERIA, critic=True, reviewer=True, review_policy="three-model", budgets=LOOSE)
+
+        # Initial execution: Step 1 succeeds, then interrupted during planning of Round 2
+        planner1 = Planner([step("s1", checks=["check-1"]), SimulatedKill()])
+        executor1 = Executor([ADD_OK])
+        critic1 = Critic([clean_critic()])
+        reviewer1 = Reviewer([(True, "Approved step 1 add")])
+
+        self.kill(planner1, executor1, critic1, reviewer1)
+
+        # Verify durable state at interruption point
+        before = self.state()
+        self.assertEqual(before["status"], "PLANNING")
+        self.assertEqual(before["manager"]["phase"], "PLANNING")
+        self.assertEqual(self.dirs(), ["0001.json"])
+        self.assertEqual(len(before["verified_progress"]), 1)
+        self.assertEqual(before["verified_progress"][0]["step_id"], "s1")
+        self.assertEqual(before["manager"]["proven_checks"], ["check-1"])
+        self.assertEqual(before["remaining_work"], ["sub works"])
+
+        # Resume execution:
+        # - Round 2 was interrupted in planning -> reconciled to ABANDONED (INTERRUPTED_IN_PLANNING)
+        # - Round 3 (attempt 1 of Step 2): fails deterministic verification
+        # - Round 4 (attempt 2 of Step 2): evidence-driven repair succeeds
+        planner2 = RepairPlanner([
+            step("s2", checks=["check-2"]),
+            step("s2", checks=["check-2"]),
+        ])
+        executor2 = Executor([
+            wrong(2),
+            BOTH_OK,
+        ])
+        critic2 = Critic([
+            clean_critic(),
+        ])
+        reviewer2 = Reviewer([
+            (True, "Approved step 2 sub repair"),
+        ])
+
+        report = self.resume(planner=planner2, executor=executor2, critic=critic2, reviewer=reviewer2)
+        self.assertEqual(report["status"], "COMPLETED")
+        self.assertEqual(len(report["rounds"]), 4)
+
+        # Round 1: Step 1 (trusted checkpoint 1)
+        r1 = report["rounds"][0]
+        self.assertEqual((r1["round"], r1["kind"], r1["outcome"], r1["trusted"]), (1, "normal", "TRUSTED", True))
+        self.assertEqual((r1["verification"], r1["critic"], r1["reviewer"]), ("passed", "completed", "approved"))
+
+        # Round 2: Interrupted in planning before execution
+        r2 = report["rounds"][1]
+        self.assertEqual((r2["round"], r2["outcome"], r2["trusted"]), (2, "ABANDONED", False))
+        self.assertEqual(r2["reason"], "INTERRUPTED_IN_PLANNING")
+
+        # Round 3: Step 2 attempt 1 fails deterministic verification (untrusted, no review gates)
+        r3 = report["rounds"][2]
+        self.assertEqual((r3["round"], r3["kind"], r3["outcome"], r3["trusted"]), (3, "normal", "UNTRUSTED", False))
+        self.assertEqual(r3["reason"], "VERIFICATION_FAILED")
+        self.assertEqual((r3["verification"], r3["critic"], r3["reviewer"]), ("failed", "not_run", "not_required"))
+
+        # Round 4: Step 2 repair succeeds (trusted checkpoint 2)
+        r4 = report["rounds"][3]
+        self.assertEqual((r4["round"], r4["kind"], r4["outcome"], r4["trusted"]), (4, "repair", "TRUSTED", True))
+        self.assertEqual((r4["verification"], r4["critic"], r4["reviewer"]), ("passed", "completed", "approved"))
+
+        # Two distinct trusted checkpoints persisted on disk
+        checkpoints = self.dirs()
+        self.assertEqual(checkpoints, ["0001.json", "0004.json"])
+
+        after = self.state()
+        self.assertEqual(len(after["verified_progress"]), 2)
+        self.assertEqual(after["verified_progress"][0]["step_id"], "s1")
+        self.assertEqual(after["verified_progress"][1]["step_id"], "repair-3")
+        self.assertEqual(after["manager"]["proven_checks"], ["check-1", "check-2"])
+        self.assertEqual(after["remaining_work"], [])
+
+        # Post-completion resume is idempotent and revalidates without duplicate work
+        idempotent_report = self.resume(planner=planner2, executor=executor2, critic=critic2, reviewer=reviewer2)
+        self.assertEqual(idempotent_report["status"], "COMPLETED")
+        self.assertEqual(len(idempotent_report["verified_progress"]), 2)
+        self.assertEqual(idempotent_report["last_verified_checkpoint"]["path"], "checkpoints/0004.json")
+
 
 class ExplicitPolicyCliTests(ManagerCase):
     parse = CliAndCompatibilityTests.parse
