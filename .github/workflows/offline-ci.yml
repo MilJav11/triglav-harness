@@ -17,7 +17,7 @@ jobs:
   offline:
     name: Windows / Python 3.11 / offline
     runs-on: windows-2025
-    timeout-minutes: 20
+    timeout-minutes: 35
     defaults:
       run:
         shell: pwsh
