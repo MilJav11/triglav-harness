@@ -1,9 +1,63 @@
 # Public qualification summary
 
-PUBLIC PREVIEW. This sanitized summary reflects the verified readiness assessment
-and retained final qualification report. No original run, raw Store, private
-identifier, prompt or machine-local link is distributed. No models were run for
-this documentation update.
+PUBLIC PREVIEW. This sanitized summary reflects the verified readiness assessment,
+retained final qualification reports, and authoritative live run milestones.
+No raw Store or sensitive local data is published.
+
+## Live Run 002 (Two Dependent WorkUnits)
+
+**LIVE_002_INDEPENDENTLY_CONFIRMED**, completed 15 October 2026.<br>
+Authoritative Run ID: `20261015T095036Z-a778f62c8873`<br>
+Commit identity: `92cd9e03148f4dd5fbe3bb532601c0a9d3f5d80d` ("feat: enable WAL-bound SafeQwen two-unit execution")<br>
+Local evidence location: `runs/20261015T095036Z-a778f62c8873` (operator qualification worktree: `triglav-live-002`)
+
+- **Scope & Task:** Two genuinely dependent coding WorkUnits in sequence:
+  - Unit 1 (`unit-1-multiply`): Implement `multiply(a, b)` in `calculator.py`.
+  - Unit 2 (`unit-2-scale`): Implement `scale(values, factor)` in `calculator.py` using `multiply`.
+  - Scope: `allowed_paths = ["calculator.py"]`, `forbidden_paths = [".gitignore", "test_calculator.py"]`.
+- **Model Invocations:**
+  - Real local Qwen3-Coder-30B-A3B (llama.cpp) code execution across both units; strictly bounded tool operations.
+  - Nemotron-3.5-Lightning-30B-A3B (llama.cpp) advisory critic: returned `CRITIC_CLEAN` (`finding_count: 0`).
+  - GPT-OSS 120B (HotPin) senior reviewer: returned `REVIEWER_APPROVED` / `APPROVE` with zero defects.
+- **Deterministic Verification:**
+  - Unit 1 passed intermediate verifier (10 tests: 4 addition regression + 6 multiplication).
+  - Unit 2 passed intermediate verifier (5 scale tests).
+  - Final Verification passed **15/15 tests** across all three frozen suites:
+    1. `test_calculator.ExistingAdditionTests` (4 tests) — PASS
+    2. `test_calculator.RequiredMultiplicationTests` (6 tests) — PASS
+    3. `test_calculator.RequiredScaleTests` (5 tests) — PASS
+- **Durable Authority & Terminal Acceptance:**
+  - **213 validated WAL records** in append-only `events.jsonl`.
+  - Final verification attempt sequence bounded at WAL [193..209]; reviewer approval bound at WAL sequence 190.
+  - Pre-write publication guard validated Store revision 150, WAL length, scoped candidate snapshot digest, and filesystem digest.
+  - Cryptographic terminal seal committed: `acceptance/term-20261015T095036Z-a778f62c8873.json` (`acceptance_id: "term-20261015T095036Z-a778f62c8873"`).
+  - Trusted checkpoint validated: `checkpoints/0000.json` (SHA-256: `94919d3058408b530463bacebd5858cd7289b29aa96208bdf7fb206563524b61`).
+  - Verified terminal acceptance: `status: "COMPLETED"`, `milestone_status: "TERMINAL_ACCEPTED"`, `terminal_accepted: true`.
+  - Independent confirmation: Codex independent review confirmed the run integrity, acceptance seal, and WAL consistency.
+- **Reporting Discrepancy Recorded:**
+  - `final-report.json` projection shows AC1, AC2, AC3 as `NOT_PROVEN` and `completion: null` despite top-level `ALL_CRITERIA_PROVEN` and `terminal_accepted: true`. Original report files remain unmodified.
+  - Authoritative basis: Store/WAL append-only log and cryptographic terminal seal establish acceptance; `final-report.json` is a legacy serialization format derived from `check_completion()` that is bypassed by the WorkUnit/terminal Store WAL execution path.
+
+## Live Run 001 (Single WorkUnit Terminal Acceptance)
+
+**LIVE_001_TERMINAL_ACCEPTANCE_PASS**, completed 14 October 2026.<br>
+Run ID: `20261014T091225Z-a23b9b7ed41c`<br>
+Commit baseline: `236d08fa3b3ca771f1f7d2b6654348a298a28a98` (M0-C terminal lifecycle integration) / `b7e1269f1229cf557c7912746d3089be00dc0243`<br>
+Local evidence location: `runs/20261014T091225Z-a23b9b7ed41c` (operator qualification worktree: `triglav-m0b-integration`)
+
+- **Scope & Task:** One real coding WorkUnit: "Implement multiply in calculator.py".
+- **Execution & Review:**
+  - Real Qwen3-Coder inference with closed SafeQwen tool protocol.
+  - Real Nemotron critic and GPT-OSS senior reviewer (`APPROVE`).
+- **Deterministic Verification:**
+  - Ran 10 frozen unit tests (`ExistingAdditionTests` + `RequiredMultiplicationTests`): 10/10 PASS.
+- **Terminal Acceptance:**
+  - **136 validated WAL records** in `events.jsonl` (approval at sequence 124, attempt end at sequence 132).
+  - Store revision: 98.
+  - Terminal seal: `acceptance/term-20261014T091225Z-a23b9b7ed41c.json`.
+  - Trusted checkpoint: `checkpoints/0000.json` (SHA-256: `9bd1180136cc486974b2373002972c669f69b5a9d3ef99a62155c0368dd71a0e`).
+  - Terminal accepted: `terminal_accepted: true`, `status: "COMPLETED"`.
+  - Retained the legacy `final-report.json` NOT_PROVEN reporting discrepancy (only AC1 NOT_PROVEN, `completion: null`). Original report files remain unmodified.
 
 ## Public Run 003
 

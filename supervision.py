@@ -91,8 +91,22 @@ class Supervisor:
         self.boot = boot or winprocess.boot_identity
         self.inspect = inspect or winprocess.identity
         self.stop_event = threading.Event()
+        self.worker_started = threading.Event()
+        self.startup_ack = self.worker_started
         self.thread = None
         self.failure = None
+        self.failures = []
+        self.entered = False
+        self.closed = False
+        self.shutdown_attempted = False
+        self.state = "never_started"
+
+    def _record_failure(self, exc):
+        if exc is not None:
+            if not any(f is exc for f in self.failures):
+                self.failures.append(exc)
+            if self.failure is None:
+                self.failure = exc
 
     def change(self, event, child=None, detail=None, **fields):
         # Event and its state transition share one WAL commit point.
@@ -328,23 +342,116 @@ class Supervisor:
                 self.change("process_heartbeat", self.observe(child, live_unload=True))
 
     def __enter__(self):
-        self.heartbeat()
-        def pulse():
-            while not self.stop_event.wait(15):
+        if self.entered or self.thread is not None:
+            raise RuntimeError("Supervisor cannot be re-entered")
+
+        self.closed = False
+        self.shutdown_attempted = False
+        self.failure = None
+        self.failures = []
+        self.stop_event.clear()
+        self.worker_started.clear()
+        self.thread = None
+        self.state = "starting"
+        start_returned = False
+        try:
+            self.heartbeat()
+            def pulse():
+                self.worker_started.set()
+                while not self.stop_event.wait(getattr(self, "_pulse_interval", 15)):
+                    try:
+                        self.heartbeat()
+                    except BaseException as exc:
+                        self._record_failure(exc)
+                        return
+            thread = threading.Thread(target=pulse, name="durable-heartbeat", daemon=True)
+            self.thread = thread
+            thread.start()
+            start_returned = True
+            self.entered = True
+            self.state = "running"
+            return self
+        except BaseException as exc:
+            self.entered = False
+            self._record_failure(exc)
+            self.stop_event.set()
+            if self.thread is not None:
+                self.state = "startup_failed_uncertain"
+                if self.worker_started.is_set() or start_returned:
+                    try:
+                        if self.thread.is_alive():
+                            self.thread.join(timeout=getattr(self, "_startup_cleanup_timeout", 0.1))
+                    except BaseException as join_err:
+                        self._record_failure(join_err)
+                    try:
+                        if self.thread.is_alive():
+                            self._record_failure(RuntimeError("Supervision heartbeat thread failed to stop"))
+                        else:
+                            self.state = "startup_failed_terminated"
+                    except BaseException as alive_err:
+                        self._record_failure(alive_err)
+            else:
+                self.state = "startup_failed_before_thread"
+            raise
+
+    def shutdown(self, *exc, timeout=5.0):
+        if not self.entered and self.thread is None:
+            raise RuntimeError("Supervisor was not entered")
+        if self.closed:
+            return
+        self.shutdown_attempted = True
+        self.stop_event.set()
+        if self.thread is not None:
+            can_join = self.worker_started.is_set() or self.entered
+            if can_join:
                 try:
-                    self.heartbeat()
-                except BaseException as exc:
-                    self.failure = exc
-                    return
-        self.thread = threading.Thread(target=pulse, name="durable-heartbeat", daemon=True)
-        self.thread.start()
-        return self
+                    alive = self.thread.is_alive()
+                except BaseException as alive_err:
+                    self._record_failure(alive_err)
+                    alive = True
+                if alive:
+                    try:
+                        self.thread.join(timeout=timeout)
+                    except BaseException as join_err:
+                        self._record_failure(join_err)
+                    try:
+                        if self.thread.is_alive():
+                            self._record_failure(RuntimeError("Supervision heartbeat thread failed to stop"))
+                    except BaseException as alive_err:
+                        self._record_failure(alive_err)
+        has_failure = (self.failure is not None) or (len(self.failures) > 0)
+        if has_failure:
+            self.state = "shutdown_failed"
+            primary_failure = self.failure if self.failure is not None else self.failures[0]
+            if not exc or exc[0] is None:
+                raise RuntimeError("Supervision heartbeat persistence failed") from primary_failure
+            if len(exc) > 1 and exc[1] is not None:
+                try:
+                    setattr(exc[1], "cleanup_error", primary_failure)
+                except BaseException:
+                    pass
+                try:
+                    setattr(exc[1], "cleanup_failures", list(self.failures))
+                except BaseException:
+                    pass
+                try:
+                    note_fn = getattr(exc[1], "add_note", None)
+                    if callable(note_fn):
+                        note_fn(f"Supervision heartbeat persistence failed: {primary_failure}")
+                except BaseException:
+                    pass
+            return
+        if self.thread is not None and not (self.worker_started.is_set() or self.entered):
+            raise RuntimeError("Supervision heartbeat startup unconfirmed")
+        self.closed = True
+        self.state = "closed"
 
     def __exit__(self, *exc):
-        self.stop_event.set()
-        self.thread.join()
-        if self.failure and exc[0] is None:
-            raise RuntimeError("Supervision heartbeat persistence failed") from self.failure
+        if not self.entered and self.thread is None:
+            raise RuntimeError("Supervisor was not entered")
+        if self.closed:
+            return
+        self.shutdown(*exc)
 
 
 def controller_status(controller, boot, clock=time.time):

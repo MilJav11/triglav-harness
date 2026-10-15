@@ -235,6 +235,8 @@ def validate_config(cfg):
             raise ValueError("SafeQwen timeout must be finite and in (0, 3600]")
     if cfg.get("review_profiles"):
         raise ValueError("SafeQwen does not support implicit HotPin profile deployment; use dedicated runtime configuration")
+    if "multi_work_unit" in cfg and not isinstance(cfg["multi_work_unit"], bool):
+        raise ValueError("SafeQwen multi_work_unit must be a boolean")
     validate_reviewer_policy(cfg)
     if tool_protocol.TOOLS != ("read_files", "edit_file", "submit"):
         raise ValueError("SafeQwen tool inventory refused")

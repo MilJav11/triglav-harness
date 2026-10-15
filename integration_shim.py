@@ -139,14 +139,9 @@ class SafeQwenExecutor:
                     or self.config["base_url"].rstrip("/") != gw.config["base_url"].rstrip("/")
                     or self.config["roles"]["code"] != gw.config["roles"]["code"]):
                 raise ExecutorError("Native model/endpoint differs from owned Gateway", "MODEL_ROUTING_MISMATCH")
-            if self.config.get("executor") == "safe_qwen":
-                from terminal_run import fixed_unit
-                expected = fixed_unit(unit_spec["objective"], self.config, self, unit_spec["verifier_ids"])
-                if (unit_spec["unit_id"] != expected["unit_id"] or unit_spec["mode"] != expected["mode"]
-                        or unit_spec["limits"] != expected["limits"]
-                        or any(sorted(unit_spec["scope"][key]) != sorted(expected["scope"][key])
-                               for key in ("allowed_paths", "forbidden_paths"))):
-                    raise ExecutorError("SafeQwen fixed WorkUnit contract mismatch", "CONTRACT_MISMATCH")
+            if self.config.get("executor") == "safe_qwen" or self.config.get("multi_work_unit"):
+                from terminal_run import validate_safe_qwen_unit_contract
+                validate_safe_qwen_unit_contract(unit_spec, self.config, self, store)
             # Validate every required/frozen file before any model lifecycle operation.
             ToolSession(self.policy, audit=audit, max_actions=self.max_actions)
             timeout = min(unit_spec["limits"]["timeout_seconds"], self.config.get("timeout_seconds", 600))
@@ -201,7 +196,7 @@ class SafeQwenExecutor:
                        "cleanup_failure": error_diagnostic(cleanup_error, "cleanup") if cleanup_error is not None else None}
             primary.diagnostic = failure
             # No evidence write through an invalid or absent Store/repository binding.
-            if (store is not None and gw is not None and getattr(gw, "supervisor", None) is not None
+            if (store is not None and hasattr(store, "artifact") and gw is not None and getattr(gw, "supervisor", None) is not None
                     and gw.supervisor.store is store and Path(repo.root).resolve() == self.policy.root
                     and not Path(store.directory).resolve().is_relative_to(self.policy.root)):
                 try:
@@ -221,7 +216,7 @@ class SafeQwenExecutor:
                 raise error from primary
             raise primary
 
-        receipt.update(episode_id=episode, duration_seconds=elapsed, model_requests=requests, cleanup="passed")
+        receipt.update(episode_id=episode, duration_seconds=elapsed, model_requests=requests, cleanup="passed", unit_id=unit_spec.get("unit_id"))
         try:
             store.artifact(f"{prefix}/result.json", receipt)
             if self.log:

@@ -136,9 +136,24 @@ validated trusted checkpoint. Sequential unloading and the owned HotPin reviewer
 32 GiB cap were verified. AC1 NOT_PROVEN / completion null remains recorded.
 See the [qualification summary](docs/triglav/QUALIFICATION.md#phase-8b-stage-2).
 
-This later live qualification supersedes the earlier pending Phase 8B status;
-the earlier export/migration checks did not themselves run models. The qualified
-deployment still depends on private operator tooling and locally provisioned
-model runtimes. **CLONE_READINESS: PARTIAL.** No full-chain clean-clone
-reproduction or general autonomous coding qualification is claimed. This
-documentation patch runs no models and changes no source, tests or configuration.
+## M0 Integration Milestones & Offline Validation
+
+Following Phase 8B, the Triglav harness integrated durable terminal acceptance, strict transaction authority, and multi-unit execution across three committed engineering milestones:
+
+| Milestone | Commit | Validated Scope | Key Verification Characteristics |
+|---|---|---:|---|
+| **M0-A** | `590e16e4b83296050c943db7a273c2cef71c584a` | 309 cases | Terminal acceptance WAL primitive in `durable.py`, tamper-evident seal, orphan seal prevention, crash recovery. |
+| **M0-B** | `eca6cf816c32e38c43042b433068207b1b9f6cdf` | 352 cases (83 durable) | Controller authority enforcement, 1-to-1 verifier WAL binding, pre-write publication guard, supervisor heartbeat value invariants. |
+| **M0-C** | `236d08fa3b3ca771f1f7d2b6654348a298a28a98` | 373 cases | Full terminal lifecycle acceptance, verified supervisor/gateway cleanup, checkpoint history preservation across interrupted finalization, idempotent reporting. |
+| **Current CI** | `92cd9e03148f4dd5fbe3bb532601c0a9d3f5d80d` | **390 cases** | Added two-WorkUnit dependency execution and production offline regression suites (`test_safe_qwen_multi_unit.py`, `test_safe_qwen_multi_unit_prod.py`). Zero live model calls. |
+
+All 390 cases run under strict execution guards in `scripts/ci_offline.py` (prohibiting unauthorized sockets, alternative process spawns, unmocked Gateway requests, and unapproved fixture modifications).
+
+## Authoritative Live Milestones
+
+In addition to offline CI regression testing, two real local model execution runs have been completed and verified:
+
+1. **Live Run 001** (`20261014T091225Z-a23b9b7ed41c`): Single WorkUnit (`multiply`), 10/10 tests passing, 136 validated WAL records, terminal acceptance seal `term-20261014T091225Z-a23b9b7ed41c.json`, trusted checkpoint `checkpoints/0000.json`.
+2. **Live Run 002** (`20261015T095036Z-a778f62c8873`): Two dependent WorkUnits (`multiply` -> `scale`), 15/15 tests passing, 213 validated WAL records, terminal acceptance seal `term-20261015T095036Z-a778f62c8873.json`, trusted checkpoint `checkpoints/0000.json`. Independently confirmed by Codex review (`LIVE_002_INDEPENDENTLY_CONFIRMED`).
+
+Both live runs retain the known legacy `final-report.json` projection discrepancy (in Live Run 001, only AC1 was reported as `NOT_PROVEN`; in Live Run 002, AC1..AC3 were reported as `NOT_PROVEN`, with `completion: null`), which is subordinate to the authoritative append-only Store WAL (`events.jsonl`) and cryptographic terminal seal. Original evidence and report files remain unmodified.

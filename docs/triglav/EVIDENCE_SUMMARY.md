@@ -27,11 +27,11 @@ This adds no clean-clone reproduction or general autonomous coding claim.
 | TQ-01 | Cline ledger fixture; 18 frozen tests, senior approval, final verification and checkpoint |
 | TQ-02 | Required file deletion; deterministic rejection, no trusted checkpoint |
 | TQ-02R | External SafeQwen fixture; 32 frozen tests, CRITIC_CLEAN, REVIEWER_APPROVED, final verification and checkpoint |
+| **Live Run 001** | Single WorkUnit (`multiply`); 10 frozen tests, real Qwen/Nemotron/GPT-OSS inference, 136 WAL records, verified terminal seal `term-20261014T091225Z-a23b9b7ed41c.json` |
+| **Live Run 002** | Two dependent WorkUnits (`multiply` -> `scale`); 15/15 frozen tests, real Qwen/Nemotron/GPT-OSS inference, 213 WAL records, verified terminal seal `term-20261015T095036Z-a778f62c8873.json`, independently confirmed by Codex |
 
-The reported TQ-02R chain contains one worker attempt, three worker completion
-requests, one critic, one reviewer, one final-verifier artifact and one checkpoint.
-Two unchanged reload/reuse checks reused acceptance evidence; they are not two
-new model or verifier runs. None establishes general autonomous reliability.
+Live Run 002 is the current authoritative live milestone (`LIVE_002_INDEPENDENTLY_CONFIRMED`).
+Both live runs retain the known legacy `final-report.json` projection discrepancy: in Live Run 001, only AC1 has the legacy NOT_PROVEN reporting discrepancy (with `completion: null`); in Live Run 002, AC1, AC2, and AC3 have the legacy NOT_PROVEN reporting discrepancy (with `completion: null`). The original `final-report.json` files remain unmodified. In both runs, this projection artifact is subordinate to the authoritative append-only Store WAL (`events.jsonl`) and cryptographic terminal seal.
 
 ## Operational limits
 
@@ -76,6 +76,8 @@ summary labels, not links to unpublished evidence or independent attestations.
 | **Q03** | External SafeQwen development had historical offline and smoke reports |
 | **Q04** | TQ-02R reported a fixed SafeQwen bugfix chain |
 | **Q05** | Historical documentation reported scoped artifact integrity checks; none was rerun here |
+| **Q06** | Live Run 001 qualified single WorkUnit terminal acceptance with 136 validated WAL records and terminal seal |
+| **Q07** | Live Run 002 qualified two dependent WorkUnits with 15/15 tests, 213 validated WAL records, and independent Codex confirmation |
 | **S01** | Cline prompt restrictions did not establish preventive no-shell confinement |
 | **S02** | Historical SafeQwen had a closed registry and exact file policy, not an OS sandbox |
 | **S03** | Historical external source/policy fingerprints used scoped global hooks; Phase 8A replaces those with direct conditional binding, independently validated offline |
