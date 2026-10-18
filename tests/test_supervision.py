@@ -5,9 +5,12 @@ import json
 import os
 from pathlib import Path
 import sys
+import subprocess
 import tempfile
 import threading
+import time
 import unittest
+import uuid
 from unittest.mock import Mock, patch
 
 import durable
@@ -1485,6 +1488,409 @@ class SupervisorLifecycleTests(unittest.TestCase):
         self.assertNotIsInstance(ctx.exception, RuntimeError)
         sup.stop_event.set()
         sup.thread.join(timeout=1.0)
+
+
+@unittest.skipUnless(os.name == "nt", "Actual Windows process handles required")
+class NativeVerifierObservationTests(unittest.TestCase):
+    """Real offline processes prove native provenance; no model or broker receipts."""
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.store = MemoryStore()
+        self.sup = s.Supervisor(self.store)
+
+    def run_verifier(self, code, *, timeout=10, cancel_event=None, args=()):
+        command = [sys.executable, "-B", "-c", code, *args]
+        return s.run_command(self.sup, command, self.root, timeout, 4096,
+                             observe_verifier=True, intended_argv=command,
+                             cancel_event=cancel_event)
+
+    def test_native_exit_and_real_verifier_identity(self):
+        result = self.run_verifier("import os; print(os.getpid())")
+        facts = result["controller_evidence"]
+        self.assertEqual(result["exit_code"], 0)
+        self.assertEqual(facts["observed_exit_code"], 0)
+        self.assertIsNone(facts["broker"])
+        self.assertEqual(facts["verifier"]["pid"], int(result["stdout"]))
+        self.assertNotEqual(facts["verifier"]["pid"], os.getpid())
+        self.assertEqual(facts["verifier"]["identity"]["executable"], IDENTITY["executable"])
+        self.assertEqual(facts["cleanup"], "observed_empty")
+        record = self.sup.child(facts["child_id"])
+        self.assertEqual(record["pid"], facts["verifier"]["pid"])
+        self.assertEqual(record["identity"], facts["verifier"]["identity"])
+        self.assertEqual(record["exit_code"], 0)
+        self.assertIsNone(winprocess.identity(record["pid"]))
+
+    def test_forged_json_and_stdout_cannot_replace_native_nonzero(self):
+        result = self.run_verifier(
+            "import pathlib,sys; pathlib.Path('exit.json').write_text("
+            "'{\"exit_code\":0,\"termination\":\"natural\"}'); "
+            "print('{\"exit_code\":0}'); sys.exit(7)")
+        self.assertEqual(result["exit_code"], 7)
+        self.assertEqual(result["controller_evidence"]["observed_exit_code"], 7)
+        self.assertEqual(json.loads((self.root / "exit.json").read_text())["exit_code"], 0)
+        self.assertEqual(result["termination"], "natural")
+
+    def test_timeout_is_observed_and_job_drained(self):
+        result = self.run_verifier("import time; time.sleep(60)", timeout=0.2)
+        self.assertIsNone(result["exit_code"])
+        self.assertEqual(result["termination"], "timeout")
+        facts = result["controller_evidence"]
+        self.assertEqual(facts["termination_basis"], "controller_deadline")
+        self.assertEqual(facts["observed_exit_code"], 137)
+        self.assertEqual(facts["cleanup"], "observed_empty")
+        self.assertIsNone(winprocess.identity(facts["verifier"]["pid"]))
+
+    def test_controller_cancel_is_forced_not_timeout(self):
+        event = threading.Event()
+        event.set()
+        result = self.run_verifier("import time; time.sleep(60)", cancel_event=event)
+        self.assertEqual(result["termination"], "forced")
+        self.assertEqual(result["controller_evidence"]["termination_basis"], "controller_cancel")
+        self.assertEqual(result["controller_evidence"]["observed_exit_code"], 137)
+        self.assertEqual(result["controller_evidence"]["cleanup"], "observed_empty")
+        self.assertIsNone(result["exit_code"])
+
+    def test_native_natural_exit_cleans_real_lingering_descendant(self):
+        result = self.run_verifier(
+            "import subprocess,sys,pathlib; p=subprocess.Popen([sys.executable,'-B','-c',"
+            "'import time; time.sleep(60)']); pathlib.Path('descendant.txt').write_text(str(p.pid))")
+        self.assertEqual(result["exit_code"], 0)
+        self.assertEqual(result["termination"], "natural")
+        self.assertEqual(result["controller_evidence"]["cleanup"], "observed_empty")
+        self.assertIsNone(winprocess.identity(int((self.root / "descendant.txt").read_text())))
+
+    def test_actual_launch_failure_has_no_verifier_identity(self):
+        command = [str(self.root / "missing.exe")]
+        result = s.run_command(self.sup, command, self.root, 10, 100,
+                               observe_verifier=True, intended_argv=command)
+        self.assertEqual(result["termination"], "launch_failed")
+        self.assertIsNone(result["exit_code"])
+        facts = result["controller_evidence"]
+        self.assertIsNone(facts["verifier"])
+        self.assertIsNone(facts["observed_exit_code"])
+        self.assertEqual(facts["cleanup"], "observed_empty")
+
+    def test_suspended_creation_gates_execution_and_retains_identity(self):
+        native = winprocess.ControllerVerifier("Local\\test-observed-" + uuid.uuid4().hex)
+        self.addCleanup(native.close)
+        marker = self.root / "executed.txt"
+        with open(os.devnull, "rb") as inp, tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+            native.launch([sys.executable, "-B", "-c", "import pathlib; pathlib.Path('executed.txt').write_text('yes')"],
+                          self.root, (inp, out, err))
+            self.assertFalse(marker.exists())
+            self.assertIsNone(native.wait(0))
+            self.assertEqual(winprocess.identity(native.pid), native.identity)
+            native.verify(native.identity)  # Query the retained handle and actual Job membership.
+            native.resume(native.identity)
+            self.assertEqual(native.wait(10), 0)
+            self.assertEqual(marker.read_text(), "yes")
+            native.drain()
+
+    def test_wrong_creation_identity_never_resumes_real_child(self):
+        native = winprocess.ControllerVerifier("Local\\test-observed-" + uuid.uuid4().hex)
+        self.addCleanup(native.close)
+        with open(os.devnull, "rb") as inp, tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+            native.launch([sys.executable, "-B", "-c", "import pathlib; pathlib.Path('wrong.txt').touch()"],
+                          self.root, (inp, out, err))
+            wrong = dict(native.identity, created="wrong-creation-time")
+            with self.assertRaisesRegex(RuntimeError, "identity/job"):
+                native.resume(wrong)
+            self.assertFalse((self.root / "wrong.txt").exists())
+            native.terminate_job()
+            native.drain()
+            self.assertEqual(native.wait(10), 137)
+
+    def test_exit_259_is_not_mistaken_for_still_active(self):
+        result = self.run_verifier("import sys; sys.exit(259)")
+        self.assertEqual(result["exit_code"], 259)
+        self.assertEqual(result["controller_evidence"]["observed_exit_code"], 259)
+
+    def test_abrupt_controller_death_kills_verifier_without_inherited_job_handle(self):
+        # A real helper controller exits without Python cleanup. The kernel must
+        # close its sole Job handle and kill the real verifier independently.
+        verifier_code = ("import os,pathlib,time; pathlib.Path('live-pid.txt').write_text(str(os.getpid())); "
+                         "time.sleep(60)")
+        helper_code = (
+            "import os,sys,time,tempfile,pathlib,winprocess; "
+            "n=winprocess.ControllerVerifier(sys.argv[1]); "
+            "i=open(os.devnull,'rb'); o=tempfile.TemporaryFile(); e=tempfile.TemporaryFile(); "
+            "n.launch([sys.executable,'-B','-c',sys.argv[3]],sys.argv[2],(i,o,e)); "
+            "n.resume(n.identity); deadline=time.monotonic()+10\n"
+            "while not (pathlib.Path(sys.argv[2])/'live-pid.txt').exists():\n"
+            "    if time.monotonic()>deadline: raise RuntimeError('verifier did not start')\n"
+            "    time.sleep(0.01)\n"
+            "os._exit(0)\n")
+        with subprocess.Popen([sys.executable, "-B", "-c", helper_code,
+                               "Local\\test-controller-death-" + uuid.uuid4().hex,
+                               str(self.root), verifier_code], cwd=Path(s.__file__).parent,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE) as helper:
+            try:
+                stdout, stderr = helper.communicate(timeout=15)
+            except subprocess.TimeoutExpired:
+                helper.kill()
+                helper.communicate(timeout=10)
+                raise
+        self.assertEqual(helper.returncode, 0, stderr.decode(errors="replace"))
+        verifier_pid = int((self.root / "live-pid.txt").read_text())
+        deadline = time.monotonic() + 5
+        while winprocess.identity(verifier_pid) is not None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertIsNone(winprocess.identity(verifier_pid))
+
+    def test_intended_and_resolved_argv_are_bound_separately(self):
+        import shutil
+        command = [str(Path(shutil.which("python")).resolve()), "-B", "-c", "pass"]
+        intended = ["python", *command[1:]]
+        result = s.run_command(self.sup, command, self.root, 10, 100,
+                               observe_verifier=True, intended_argv=intended)
+        facts = result["controller_evidence"]
+        self.assertEqual(facts["intended_command_sha256"], s.checksum(intended))
+        self.assertEqual(facts["resolved_command_sha256"], s.checksum(command))
+        self.assertNotEqual(facts["intended_command_sha256"], facts["resolved_command_sha256"])
+
+    # Supplemental faults still use actual processes; mocks only inject failure.
+    def test_failed_identity_persistence_does_not_release_suspended_child(self):
+        with patch.object(self.sup, "started", side_effect=OSError("commit failed")):
+            with self.assertRaises(s.VerifierEvidenceError) as raised:
+                self.run_verifier("import pathlib; pathlib.Path('forbidden.txt').touch()")
+        self.assertFalse((self.root / "forbidden.txt").exists())
+        self.assertEqual(raised.exception.evidence["termination"], "observation_failed")
+        self.assertEqual(raised.exception.evidence["cleanup"], "observed_empty")
+        self.assertIsNone(winprocess.identity(raised.exception.evidence["verifier"]["pid"]))
+
+    def test_expired_deadline_before_resume_never_executes_verifier_code(self):
+        started = self.sup.started
+        def slow_persistence(child_id, pid):
+            started(child_id, pid)  # Actual native process identity observation.
+            time.sleep(0.05)
+        with patch.object(self.sup, "started", side_effect=slow_persistence):
+            result = self.run_verifier("import pathlib; pathlib.Path('late.txt').touch()", timeout=0.01)
+        self.assertEqual(result["termination"], "timeout")
+        self.assertFalse(result["controller_evidence"]["execution_started"])
+        self.assertFalse((self.root / "late.txt").exists())
+        self.assertEqual(result["controller_evidence"]["cleanup"], "observed_empty")
+
+    def test_missing_cleanup_observation_cannot_return_success(self):
+        with patch.object(winprocess.ControllerVerifier, "drain", side_effect=RuntimeError("drain unavailable")):
+            with self.assertRaises(s.VerifierEvidenceError) as raised:
+                self.run_verifier("pass")
+        self.assertEqual(raised.exception.evidence["cleanup"], "incomplete")
+        self.assertNotEqual(next(iter(self.store.state["supervision"]["children"].values()))["state"], "EXITED")
+
+    def test_contradictory_argv_and_missing_opt_in_are_rejected(self):
+        command = [sys.executable, "-B", "-c", "pass"]
+        for options in ({"intended_argv": command},
+                        {"observe_verifier": "yes", "intended_argv": command},
+                        {"observe_verifier": True},
+                        {"observe_verifier": True, "intended_argv": [sys.executable, "-c", "wrong"]},
+                        {"observe_verifier": True, "intended_argv": command, "opencode": True}):
+            with self.assertRaises(ValueError):
+                s.run_command(self.sup, command, self.root, 10, 100, **options)
+        self.assertEqual(self.store.state["supervision"]["children"], {})
+
+    def test_atomic_job_membership_and_crash_at_native_creation_return(self):
+        import ctypes as C
+        import textwrap
+        from ctypes import wintypes as W
+        # Instrument the REAL native call in another controller, never its
+        # result. Exit before _create_verifier_in_job or launch can return.
+        helper_code = textwrap.dedent('''
+            import ctypes as C, json, os, sys, tempfile, _winapi, winprocess
+            from ctypes import wintypes as W
+            native = winprocess.ControllerVerifier(sys.argv[1])
+            k = native.k
+            real_create = k.CreateProcessW
+            def after_create(*args):
+                real_create.argtypes = after_create.argtypes
+                real_create.restype = after_create.restype
+                ok = real_create(*args)
+                if not ok:
+                    return ok
+                info = C.cast(args[-1], C.POINTER(winprocess._ProcessInformation)).contents
+                try:
+                    member = W.BOOL()
+                    if not k.IsProcessInJob(info.hProcess, native.job.handle, C.byref(member)):
+                        raise C.WinError(C.get_last_error())
+                    parent = k.OpenProcess(0x0040, False, int(sys.argv[2]))
+                    if not parent:
+                        raise C.WinError(C.get_last_error())
+                    try:
+                        # Retain only the process in the test runner, never the Job.
+                        observed = _winapi.DuplicateHandle(_winapi.GetCurrentProcess(), info.hProcess,
+                                                          parent, 0x101001, False, 0)
+                    finally:
+                        k.CloseHandle(parent)
+                    print(json.dumps(dict(handle=observed, pid=info.dwProcessId,
+                                          member=bool(member.value),
+                                          bookkeeping_absent=native.process is None and native.pid is None)), flush=True)
+                except BaseException:
+                    # Instrumentation failures must not strand an uncontained
+                    # child even when exercising a regressed creation path.
+                    _winapi.TerminateProcess(info.hProcess, 137)
+                    _winapi.WaitForSingleObject(info.hProcess, 10000)
+                    _winapi.CloseHandle(info.hThread)
+                    _winapi.CloseHandle(info.hProcess)
+                    raise
+                os._exit(73)
+            k.CreateProcessW = after_create
+            try:
+                with open(os.devnull, 'rb') as inp, tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+                    native.launch([sys.executable, '-B', '-c',
+                                   "import pathlib; pathlib.Path('must-not-run.txt').touch()"],
+                                  sys.argv[3], (inp, out, err))
+                raise RuntimeError('crash boundary was not reached')
+            finally:
+                native.close()
+        ''')
+        k = winprocess._kernel()
+        k.GetProcessId.argtypes, k.GetProcessId.restype = [W.HANDLE], W.DWORD
+        k.GetExitCodeProcess.argtypes = [W.HANDLE, C.POINTER(W.DWORD)]
+        observed = None
+        facts = {}
+        with subprocess.Popen([sys.executable, "-B", "-c", helper_code,
+                               "Local\\atomic-boundary-" + uuid.uuid4().hex,
+                               str(os.getpid()), str(self.root)], cwd=Path(s.__file__).parent,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE) as helper:
+            try:
+                stdout, stderr = helper.communicate(timeout=15)
+            except subprocess.TimeoutExpired:
+                helper.kill()
+                stdout, stderr = helper.communicate(timeout=10)
+            try:
+                if stdout.strip():
+                    facts = json.loads(stdout)
+                    observed = facts["handle"]
+                    self.assertEqual(k.GetProcessId(observed), facts["pid"])
+                self.assertEqual(helper.returncode, 73, stderr.decode(errors="replace"))
+                self.assertTrue(facts["bookkeeping_absent"])
+                self.assertTrue(facts["member"])
+                self.assertEqual(k.WaitForSingleObject(observed, 10000), 0,
+                                 "Verifier survived controller death at native creation boundary")
+                code = W.DWORD()
+                self.assertTrue(k.GetExitCodeProcess(observed, C.byref(code)))
+                self.assertFalse((self.root / "must-not-run.txt").exists())
+            finally:
+                if observed is not None:
+                    # Even a regressed/uncontained child is safely killed by its
+                    # retained creation handle. Never attach to or kill by PID.
+                    import _winapi
+                    try:
+                        if k.WaitForSingleObject(observed, 0) != 0:
+                            _winapi.TerminateProcess(observed, 137)
+                            self.assertEqual(k.WaitForSingleObject(observed, 10000), 0)
+                    finally:
+                        k.CloseHandle(observed)
+
+    def test_atomic_creation_preserves_standard_streams_and_quoted_unicode_argv(self):
+        native = winprocess.ControllerVerifier("Local\\atomic-streams-" + uuid.uuid4().hex)
+        self.addCleanup(native.close)
+        arguments = ["with spaces", 'embedded "quote"', "trailing\\", "", "žluťoučký"]
+        command = [sys.executable, "-B", "-X", "utf8", "-c",
+                   "import json,sys; print(json.dumps(sys.argv[1:],ensure_ascii=False)); "
+                   "print(sys.stdin.read()); print('stderr-ok',file=sys.stderr)", *arguments]
+        with tempfile.TemporaryFile() as inp, tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+            inp.write(b"stdin-ok")
+            inp.seek(0)
+            native.launch(command, self.root, (inp, out, err))
+            self.assertIsNone(native.wait(0))
+            native.resume(native.identity)
+            self.assertEqual(native.wait(10), 0)
+            native.drain()
+            out.seek(0)
+            lines = out.read().decode("utf-8").splitlines()
+            self.assertEqual(json.loads(lines[0]), arguments)
+            self.assertEqual(lines[1], "stdin-ok")
+            err.seek(0)
+            self.assertEqual(err.read().decode("utf-8").strip(), "stderr-ok")
+
+    def test_atomic_creation_excludes_unlisted_inheritable_and_privileged_handles(self):
+        import ctypes as C
+        from ctypes import wintypes as W
+        k = winprocess._kernel()
+        k.CreateEventW.argtypes, k.CreateEventW.restype = [C.c_void_p, W.BOOL, W.BOOL, W.LPCWSTR], W.HANDLE
+        k.SetHandleInformation.argtypes = [W.HANDLE, W.DWORD, W.DWORD]
+        k.GetHandleInformation.argtypes = [W.HANDLE, C.POINTER(W.DWORD)]
+        sentinel = k.CreateEventW(None, True, False, None)
+        self.assertTrue(sentinel)
+        self.addCleanup(k.CloseHandle, sentinel)
+        self.assertTrue(k.SetHandleInformation(sentinel, 1, 1))  # Deliberately inheritable, but unlisted.
+        native = winprocess.ControllerVerifier("Local\\atomic-handles-" + uuid.uuid4().hex)
+        self.addCleanup(native.close)
+        code = ("import ctypes as C,sys; from ctypes import wintypes as W; "
+                "k=C.WinDLL('kernel32',use_last_error=True); "
+                "k.SetEvent.argtypes=[W.HANDLE]; print(bool(k.SetEvent(int(sys.argv[1]))))")
+        with open(os.devnull, "rb") as inp, tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+            native.launch([sys.executable, "-B", "-c", code, str(sentinel)], self.root, (inp, out, err))
+            for handle in (native.job.handle, native.process, native.thread):
+                flags = W.DWORD()
+                self.assertTrue(k.GetHandleInformation(handle, C.byref(flags)))
+                self.assertEqual(flags.value & 1, 0)
+            native.resume(native.identity)
+            self.assertEqual(native.wait(10), 0)
+            native.drain()
+            self.assertEqual(k.WaitForSingleObject(sentinel, 0), 258,
+                             "Unlisted inheritable event leaked into verifier")
+
+    def test_atomic_creation_rejects_job_without_assignment_access(self):
+        name = "Local\\atomic-denied-" + uuid.uuid4().hex
+        native = winprocess.ControllerVerifier(name)
+        self.addCleanup(native.close)
+        full = native.job.handle
+        # A genuine kernel access failure, not a mocked CreateProcess return.
+        query_only = native.k.OpenJobObjectW(0x0004, False, name)
+        self.assertTrue(query_only)
+        native.job.handle = query_only
+        try:
+            with open(os.devnull, "rb") as inp, tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+                with self.assertRaises(OSError):
+                    native.launch([sys.executable, "-B", "-c", "import pathlib; pathlib.Path('uncontained.txt').touch()"],
+                                  self.root, (inp, out, err))
+            self.assertIsNone(native.process)
+            self.assertIsNone(native.pid)
+            native.drain()
+            self.assertFalse((self.root / "uncontained.txt").exists())
+        finally:
+            native.job.handle = full
+            native.k.CloseHandle(query_only)
+
+    def test_atomic_ctypes_layout_and_handle_resource_cleanup(self):
+        import ctypes as C
+        import _winapi
+        from ctypes import wintypes as W
+        self.assertEqual(C.sizeof(C.c_void_p), 8)  # Authorized Windows 11 x64 target.
+        self.assertEqual(C.sizeof(winprocess._StartupInfoW), 104)
+        self.assertEqual(C.sizeof(winprocess._StartupInfoExW), 112)
+        self.assertEqual(C.sizeof(winprocess._ProcessInformation), 24)
+        k = winprocess._kernel()
+        k.GetProcessHandleCount.argtypes = [W.HANDLE, C.POINTER(W.DWORD)]
+        def count():
+            value = W.DWORD()
+            self.assertTrue(k.GetProcessHandleCount(_winapi.GetCurrentProcess(), C.byref(value)))
+            return value.value
+        def cycle():
+            self.run_verifier("pass")
+            native = winprocess.ControllerVerifier("Local\\atomic-failure-" + uuid.uuid4().hex)
+            with open(os.devnull, "rb") as inp, tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+                try:
+                    with self.assertRaises(OSError):
+                        native.launch([str(self.root / "missing.exe")], self.root, (inp, out, err))
+                finally:
+                    native.close()
+                    native.close()  # Idempotent: never double-close released handles.
+        # Windows/runtime lazy initialization can allocate persistent handles on
+        # the first failed creation. Warm BOTH paths, then check repeated use.
+        import gc
+        cycle()
+        gc.collect()
+        before = count()
+        observations = []
+        for _ in range(3):
+            cycle()
+            gc.collect()
+            observations.append(count())
+        self.assertLessEqual(max(observations), before, observations)
 
 
 if __name__ == "__main__":

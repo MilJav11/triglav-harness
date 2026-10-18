@@ -532,6 +532,8 @@ class Gateway:
         self.active_model_child_id = None
         self.supervisor = None
         self.execution_deadline = None
+        self.execution_response_limit = None
+        self.execution_cancel_event = None
 
     def set_deadline(self, deadline):
         self.execution_deadline = deadline
@@ -544,7 +546,16 @@ class Gateway:
             raise TimeoutError("Model stage execution deadline elapsed")
         return min(timeout, remaining)
 
-    def request(self, method: str, path: str, payload=None, timeout: float = 10):
+    def request(self, method: str, path: str, payload=None, timeout: float = 10, *,
+                max_response_bytes=None, cancel_event=None):
+        maximum = self.execution_response_limit if max_response_bytes is None else max_response_bytes
+        cancel = self.execution_cancel_event if cancel_event is None else cancel_event
+        if maximum is not None and (type(maximum) is not int or not 1 <= maximum <= 4 * 1024 * 1024):
+            raise ValueError("Invalid controller response byte limit")
+        if cancel is not None and type(cancel) is not threading.Event:
+            raise ValueError("Invalid controller cancellation event")
+        if cancel is not None and cancel.is_set():
+            raise TimeoutError("Model request cancelled by controller")
         timeout = self.bounded_timeout(timeout)
         body = None if payload is None else json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(
@@ -552,8 +563,10 @@ class Gateway:
             headers={"Content-Type": "application/json"},
         )
         timers = []
+        cancelled_watchers = []
+        finished = threading.Event()
         opener = urllib.request.urlopen
-        if self.execution_deadline is not None:
+        if self.execution_deadline is not None or cancel is not None or maximum is not None:
             deadline = self.execution_deadline
             def connection(base):
                 class DeadlineConnection(base):
@@ -565,10 +578,20 @@ class Gateway:
                                 sock.shutdown(socket.SHUT_RDWR)
                             except OSError:
                                 pass
-                        timer = threading.Timer(max(0, deadline - time.monotonic()), interrupt)
-                        timer.daemon = True
-                        timers.append(timer)
-                        timer.start()
+                        if deadline is not None:
+                            timer = threading.Timer(max(0, deadline - time.monotonic()), interrupt)
+                            timer.daemon = True
+                            timers.append(timer)
+                            timer.start()
+                        if cancel is not None:
+                            def watch():
+                                while not finished.wait(0.01):
+                                    if cancel.is_set():
+                                        interrupt()
+                                        return
+                            watcher = threading.Thread(target=watch, daemon=True)
+                            cancelled_watchers.append(watcher)
+                            watcher.start()
                 return DeadlineConnection
             class DeadlineHTTP(urllib.request.HTTPHandler):
                 def http_open(handler, request):
@@ -577,10 +600,20 @@ class Gateway:
                 def https_open(handler, request):
                     return handler.do_open(connection(http.client.HTTPSConnection), request,
                                            context=handler._context)
-            opener = urllib.request.build_opener(DeadlineHTTP(), DeadlineHTTPS()).open
+            handlers = [DeadlineHTTP(), DeadlineHTTPS()]
+            if maximum is not None:
+                class FixedEndpoint(urllib.request.HTTPRedirectHandler):
+                    def redirect_request(handler, *args, **kwargs):
+                        raise ValueError("Controller-bound request cannot change endpoint")
+                handlers.extend([urllib.request.ProxyHandler({}), FixedEndpoint()])
+            opener = urllib.request.build_opener(*handlers).open
         try:
             with opener(req, timeout=timeout) as response:
-                raw = response.read()
+                raw = response.read() if maximum is None else response.read(maximum + 1)
+                if maximum is not None and len(raw) > maximum:
+                    raise ValueError("Model response exceeds controller byte limit")
+                if cancel is not None and cancel.is_set():
+                    raise TimeoutError("Model request cancelled by controller")
                 self.bounded_timeout(timeout)
                 if not raw:
                     return None
@@ -595,8 +628,11 @@ class Gateway:
             raise RuntimeError(f"{method} {path}: HTTP {exc.code}: {detail}") from exc
 
         finally:
+            finished.set()
             for timer in timers:
                 timer.cancel()
+            for watcher in cancelled_watchers:
+                watcher.join(0.1)
 
     def health(self):
         return self.request("GET", "/health")
