@@ -562,6 +562,10 @@ def main():
         os.environ[f"GIT_CONFIG_VALUE_{index}"] = value
     sys.path.insert(0, str(ROOT))
     sys.path.insert(0, str(ROOT / "tests"))
+    report = None
+    if os.environ.get("TRIGLAV_CI_GUARDED_OUTPUT"):
+        from scripts.ci_supplemental import GuardedReport
+        report = GuardedReport(os.environ["TRIGLAV_CI_GUARDED_OUTPUT"],os.environ.get("TRIGLAV_CI_BATCH"))
     syntax_check()
     with tempfile.TemporaryDirectory(prefix="triglav-ci-") as temporary:
         policy = ProcessPolicy(ROOT, Path(temporary))
@@ -615,7 +619,8 @@ def main():
                 suite = unittest.defaultTestLoader.loadTestsFromName(module)
                 if suite.countTestCases() != expected:
                     raise OfflineViolation(f"{module}: test count changed; review CI scope")
-                result = unittest.TextTestRunner(verbosity=2).run(suite)
+                options = {"resultclass": report.result_class} if report else {}
+                result = unittest.TextTestRunner(verbosity=2, **options).run(suite)
                 if not result.wasSuccessful() or result.skipped:
                     return 1
             out, err = io.StringIO(), io.StringIO()
@@ -629,6 +634,8 @@ def main():
                 raise OfflineViolation("Unexpected CLI help output")
             if policy.denied:
                 raise OfflineViolation("A prohibited operation was attempted")
+            if report:
+                report.seal(head,policy.head_probes)
             print(f"PASS: {sum(MODULES.values())} reviewed offline cases; CLI help; "
                   f"{policy.head_probes} real HEAD probes; model calls 0", flush=True)
     return 0

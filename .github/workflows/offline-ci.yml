@@ -5,9 +5,21 @@ on:
     branches: [main]
   push:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      full_qualification:
+        description: Run complete Phase 3.1 qualification (fast guarded gate always runs)
+        type: boolean
+        default: true
 
 permissions:
   contents: read
+
+env:
+  TRIGLAV_CI_BATCH: ${{ github.run_id }}.${{ github.run_attempt }}
+  TRIGLAV_CI_EXPECTED_HEAD: ${{ github.sha }}
+  PYTHONDONTWRITEBYTECODE: "1"
+  PYTHONUTF8: "1"
 
 concurrency:
   group: offline-ci-${{ github.workflow }}-${{ github.ref }}
@@ -15,21 +27,23 @@ concurrency:
 
 jobs:
   offline:
-    name: Windows / Python 3.11 / offline
+    name: FAST_PR_PASS / Windows / Python 3.11 / guarded
     runs-on: windows-2025
     timeout-minutes: 35
     defaults:
       run:
         shell: pwsh
     env:
-      PYTHONDONTWRITEBYTECODE: "1"
-      PYTHONUTF8: "1"
+      TRIGLAV_CI_GUARDED_OUTPUT: ${{ (github.event_name != 'workflow_dispatch' || inputs.full_qualification) && 'runs/ci/guarded' || '' }}
     steps:
+      - name: Preserve reviewed source bytes
+        run: git config --global core.autocrlf false
       - name: Check out event revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           fetch-depth: 1
+          ref: ${{ github.sha }}
       - name: Set up Python 3.11
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -37,3 +51,116 @@ jobs:
           architecture: x64
       - name: Parse source and run guarded offline checks
         run: python -B scripts/ci_offline.py
+      - name: Upload guarded evidence
+        if: ${{ always() && (github.event_name != 'workflow_dispatch' || inputs.full_qualification) }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ env.TRIGLAV_CI_BATCH }}-guarded
+          path: runs/ci/guarded
+          if-no-files-found: error
+          retention-days: 14
+
+  shards:
+    name: Phase 3.1 supplemental shard ${{ matrix.shard }}
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.full_qualification }}
+    runs-on: windows-2025
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+          ref: ${{ github.sha }}
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+          architecture: x64
+      - name: Run sequential trusted-entry shard
+        run: python -B scripts/ci_supplemental.py selection --selection shard-${{ matrix.shard }} --batch "$env:TRIGLAV_CI_BATCH" --output runs/ci/shard-${{ matrix.shard }}
+      - name: Upload shard evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ env.TRIGLAV_CI_BATCH }}-shard-${{ matrix.shard }}
+          path: runs/ci/shard-${{ matrix.shard }}
+          if-no-files-found: error
+          retention-days: 14
+
+  mandatory:
+    name: Phase 3.1 ${{ matrix.group }}
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.full_qualification }}
+    runs-on: windows-2025
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [policy, runner]
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+          ref: ${{ github.sha }}
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+          architecture: x64
+      - name: Run mandatory group sequentially
+        run: python -B scripts/ci_supplemental.py selection --selection ${{ matrix.group }} --batch "$env:TRIGLAV_CI_BATCH" --output runs/ci/${{ matrix.group }}
+      - name: Upload mandatory evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ env.TRIGLAV_CI_BATCH }}-${{ matrix.group }}
+          path: runs/ci/${{ matrix.group }}
+          if-no-files-found: error
+          retention-days: 14
+
+  full-summary:
+    name: FULL_PHASE3_1_QUALIFIED
+    needs: [offline, shards, mandatory]
+    if: ${{ always() && (github.event_name != 'workflow_dispatch' || inputs.full_qualification) }}
+    runs-on: windows-2025
+    timeout-minutes: 15
+    env:
+      TRIGLAV_CI_UPSTREAM_OK: ${{ needs.offline.result == 'success' && needs.shards.result == 'success' && needs.mandatory.result == 'success' }}
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+          ref: ${{ github.sha }}
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+          architecture: x64
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: ${{ env.TRIGLAV_CI_BATCH }}-*
+          path: runs/ci/artifacts
+      - name: Require every exact case and artifact
+        run: python -B scripts/ci_verify_summary.py runs/ci/artifacts --full --batch "$env:TRIGLAV_CI_BATCH" --output runs/ci/qualification.json
+      - name: Upload final summary
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: qualification-${{ env.TRIGLAV_CI_BATCH }}
+          path: runs/ci/qualification.json
+          if-no-files-found: error
+          retention-days: 14
