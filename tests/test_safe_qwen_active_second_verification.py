@@ -90,8 +90,11 @@ class SecondVerificationTests(unittest.TestCase):
         return self.scheduler.qualify_safe_qwen_repair_recovery("safe-qwen-task", gateway=self.gateway, timeout_seconds=600)
 
     def test_repaired_file_passes_with_exact_wal_and_native_bindings(self):
+        import _winapi
         launches, resumes, owners = [], [], []
+        observed = {}
         launch, resume = winprocess.ControllerVerifier.launch, winprocess.ControllerVerifier.resume
+        drain = winprocess.ControllerVerifier.drain
         def created(native, *args):
             owners.append(id(self.store._safe_qwen_active_controller))
             state = self.reload().state
@@ -101,7 +104,22 @@ class SecondVerificationTests(unittest.TestCase):
                 self.assertIsNone(self.proc)  # Inert owned model is already unloaded.
                 self.assertTrue(any((c.get("invocation") or {}).get("phase") == "INTENT"
                                     for c in state["supervision"]["children"].values()))
-            result = launch(native, *args); launches.append(native.pid); return result
+            result = launch(native, *args)
+            # Retain the original process object, never reattach a historical PID.
+            # Query/synchronize only; no inherited process or Job handles.
+            current = _winapi.GetCurrentProcess()
+            handle = _winapi.DuplicateHandle(current, native.process, current, 0x1000 | 0x100000, False, 0)
+            self.addCleanup(_winapi.CloseHandle, handle)
+            self.assertFalse(os.get_handle_inheritable(handle))
+            self.assertEqual(winprocess._handle_identity(native.k, handle), native.identity)
+            observed[native] = dict(handle=handle, process=dict(pid=native.pid, identity=copy.deepcopy(native.identity)), drained=False)
+            launches.append(native.pid)
+            return result
+        def drained(native, *args, **kwargs):
+            result = drain(native, *args, **kwargs)  # Actual Job emptiness, including descendants.
+            self.assertEqual(_winapi.WaitForSingleObject(observed[native]["handle"], 0), 0)
+            observed[native]["drained"] = True
+            return result
         def released(native, identity):
             if len(launches) == 4:
                 children = self.reload().state["supervision"]["children"].values()
@@ -110,7 +128,8 @@ class SecondVerificationTests(unittest.TestCase):
                 self.assertEqual(child["identity"], identity)
                 native.verify(identity)
             resumes.append(native.pid); return resume(native, identity)
-        with patch.object(winprocess.ControllerVerifier, "launch", created), patch.object(winprocess.ControllerVerifier, "resume", released):
+        with patch.object(winprocess.ControllerVerifier, "launch", created), patch.object(winprocess.ControllerVerifier, "resume", released), \
+                patch.object(winprocess.ControllerVerifier, "drain", drained):
             result = self.run_verified()
         state = self.reload().state; d = state[active.KEY]; v = result["verification"]
         self.assertEqual((d["schema_version"], d["mode"]), (7, verification.SECOND_MODE))
@@ -124,7 +143,16 @@ class SecondVerificationTests(unittest.TestCase):
         self.assertEqual(len(launches), 4)  # Two logical workers + two native verifiers.
         self.assertEqual(resumes, launches)
         self.assertEqual(len(set(owners)), 1, "One uninterrupted registered controller owns all four launches")
-        self.assertTrue(all(winprocess.identity(pid) is None for pid in launches))
+        evidence = [d["result"]["evidence"], d["verification"]["observations"]["check-1"]["native"],
+                    d["dispatch"]["result"]["evidence"], v["observations"]["check-1"]["native"]]
+        self.assertEqual(len(observed), 4)
+        for (native, observation), facts in zip(observed.items(), evidence):
+            self.assertEqual(observation["process"], facts.get("process", facts.get("verifier")))
+            self.assertTrue(observation["drained"])
+            self.assertEqual(facts["cleanup"], "observed_empty")
+            self.assertEqual(_winapi.WaitForSingleObject(observation["handle"], 0), 0)
+            self.assertEqual(_winapi.GetExitCodeProcess(observation["handle"]), facts["observed_exit_code"])
+            self.assertIsNone(winprocess._handle_identity(native.k, observation["handle"]))
         ref = v["binding"]["dispatch_wal"]
         record = self.store.records[ref["sequence"] - 1]
         self.assertEqual(ref["sha256"], record["sha256"])

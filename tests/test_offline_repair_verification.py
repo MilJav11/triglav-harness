@@ -437,5 +437,3 @@ with patch('harness.Gateway',side_effect=AssertionError('No models')),patch('dur
                 self.assertEqual(len(loaded.state["work_units"]["units"]["unit-1"]["attempts"]), 2)
                 self.repo.root = Path(loaded.state["target_repository"])
                 self.assert_no_adoption(loaded)
-
-
