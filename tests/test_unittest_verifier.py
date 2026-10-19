@@ -16,6 +16,35 @@ from unittest_verifier import (
 )
 
 
+def _verifier_failure_diagnostic(result, async_teardown_reached, observed_exceptions=()):
+    """Closed diagnostic projection, under 1024 ASCII bytes; no exception text."""
+    import builtins
+    import json
+
+    result = result if type(result) is dict else {}
+    exceptions = {name for name, cls in vars(builtins).items()
+                  if isinstance(cls, type) and issubclass(cls, BaseException)}
+    expected_id = "test_unittest_verifier.Fixtures.AsyncTearDownFailure.test_async_body"
+    ids = result.get("failed_test_ids"); ids = ids[:4] if type(ids) is list else []
+    observed = observed_exceptions[:4] if type(observed_exceptions) in (list, tuple) else ()
+    safe_ids = []
+    categories = [value for value in observed if type(value) is str and value in exceptions]
+    for value in ids:
+        category = value.removeprefix("execution_aborted: ") if type(value) is str else ""
+        if category in exceptions:
+            categories.append(category); safe_ids.append("execution_aborted: " + category)
+        else:
+            safe_ids.append(expected_id if type(value) is str and value == expected_id else "[REDACTED]")
+    kind = result.get("outcome_kind")
+    value = dict(outcome_kind=kind if type(kind) is str and kind in {"passed", "assertion_failure", "execution_error", "discovery_error"} else None,
+        failed_test_ids=safe_ids, original_exception_categories=categories,
+        async_teardown_reached=async_teardown_reached is True)
+    for key in ("failure_count", "error_count", "tests_run"):
+        count = result.get(key); value[key] = count if type(count) is int and 0 <= count <= 1000000 else None
+    encoded = json.dumps(value, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
+    return encoded if len(encoded) <= 1024 else '{"diagnostic_truncated":true}'
+
+
 class Fixtures:
     """Isolated unittest fixtures used by the adapter tests."""
 
@@ -365,11 +394,34 @@ class TestUnittestVerifierAdapter(unittest.TestCase):
 
     # Regression 1: Async tearDown assertion failure MUST return execution_error
     def test_async_teardown_failure_returns_execution_error(self):
-        res = run_unittest_verifier(Fixtures.AsyncTearDownFailure)
+        from unittest.mock import patch
+
+        teardown_reached = False
+        exception_categories = []
+        original = Fixtures.AsyncTearDownFailure.asyncTearDown
+        original_setup = Fixtures.AsyncTearDownFailure._callSetUp
+        def observed_setup(case):
+            try:
+                return original_setup(case)
+            except BaseException as exc:
+                exception_categories.append(type(exc).__name__)
+                raise
+        async def observed_teardown(case):
+            nonlocal teardown_reached
+            teardown_reached = True
+            try:
+                return await original(case)
+            except BaseException as exc:
+                exception_categories.append(type(exc).__name__)
+                raise
+        with patch.object(Fixtures.AsyncTearDownFailure, "asyncTearDown", observed_teardown), \
+                patch.object(Fixtures.AsyncTearDownFailure, "_callSetUp", observed_setup):
+            res = run_unittest_verifier(Fixtures.AsyncTearDownFailure)
         self._assert_schema_valid(res)
         self.assertEqual(res["outcome_kind"], OUTCOME_EXECUTION_ERROR)
         self.assertEqual(res["tests_run"], 1)
-        self.assertEqual(res["failure_count"], 1)
+        self.assertEqual(res["failure_count"], 1,
+                         msg=_verifier_failure_diagnostic(res, teardown_reached, exception_categories))
         self.assertEqual(len(res["failed_test_ids"]), 1)
 
     # Regression 2: Duplicate test ID executing across different phases MUST return execution_error
