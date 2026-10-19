@@ -11,9 +11,89 @@ import safe_qwen_active_grant as grants
 import test_safe_qwen_active_grant as fixtures
 
 
+def _allocation_diagnostic(state, observed, clock):
+    """Closed diagnostic schema; null numbers and 'unknown' enums mean unproven."""
+    import json
+    import math
+
+    def mapping(value): return value if type(value) is dict else {}
+    def choice(value, allowed): return value if type(value) is str and value in allowed else "unknown"
+    def number(value):
+        return value if type(value) in (int, float) and abs(value) <= 1e12 and math.isfinite(value) else None
+    def boolean(value): return value if type(value) is bool else None
+    def remaining(deadline, now):
+        deadline, now = number(deadline), number(now)
+        return number(deadline - now) if deadline is not None and now is not None else None
+    state, observed = mapping(state), mapping(observed)
+    data = mapping(state.get(active.KEY)); identity = mapping(data.get("identity"))
+    result = mapping(data.get("result")); worker = mapping(result.get("evidence"))
+    cleanup = mapping(result.get("cleanup_proof")); verification = mapping(data.get("verification"))
+    native = mapping(mapping(mapping(verification.get("observations")).get("check-1")).get("native"))
+    grants = mapping(state.get("repair_authorizations"))
+    grant = mapping(next(iter(grants.values()))) if len(grants) == 1 else {}
+    authorization = choice(grant.get("state"), {"GRANTED", "CONSUMED"})
+    if "repair_authorizations" not in state: authorization = "absent"
+    decision = choice(observed.get("decision"), {"ALLOW", "DENY"})
+    calls = observed.get("policy_calls")
+    disposition = ("consumed" if authorization == "CONSUMED" else "created" if authorization == "GRANTED"
+                   else "rejected" if authorization == "absent" and decision == "DENY"
+                   else "never_allocated" if authorization == "absent" and type(calls) is int and calls == 0
+                   else "unknown")
+    value = dict(schema_version=1, policy_calls=number(calls), policy_decision=decision,
+        policy_reason_code=choice(observed.get("reason_code"), {
+            "ALLOW_VERIFIER_FAILURE", "DENY_ATTEMPTS_EXHAUSTED", "DENY_SCOPE_VIOLATION", "DENY_TIMEOUT",
+            "DENY_UNVERIFIED_MUTATIONS", "DENY_ENVIRONMENT_DRIFT", "DENY_PROCESS_NOT_IDLE",
+            "DENY_MISSING_EVIDENCE", "DENY_CONTRADICTORY_EVIDENCE", "DENY_INSUFFICIENT_BUDGET",
+            "DENY_UNKNOWN_FAILURE", "DENY_DEFAULT"}),
+        authorization_state=authorization, authorization_disposition=disposition,
+        shared_started_clock=number(identity.get("started_clock")), shared_deadline=number(identity.get("deadline")),
+        shared_budget_seconds=remaining(identity.get("deadline"), identity.get("started_clock")),
+        policy_clock=number(observed.get("policy_clock")), observed_clock=number(clock),
+        remaining_at_policy_seconds=remaining(identity.get("deadline"), observed.get("policy_clock")),
+        remaining_at_observation_seconds=remaining(identity.get("deadline"), clock),
+        verification_outcome=choice(verification.get("outcome"), {"passed", "failed", "timeout"}),
+        verification_elapsed_seconds=number(verification.get("elapsed_seconds")),
+        verifier_termination_basis=choice(native.get("termination_basis"), {
+            "signaled_without_controller_termination", "controller_deadline", "controller_cancel"}),
+        verifier_exit_code=number(native.get("observed_exit_code")),
+        verifier_cleanup=choice(native.get("cleanup"), {"observed_empty", "not_observed", "incomplete"}),
+        worker_outcome=choice(result.get("outcome"), {"executor_succeeded_unverified", "executor_failed_unverified"}),
+        worker_termination_basis=choice(worker.get("termination_basis"), {
+            "not_launched", "executing", "controller_cancel", "controller_deadline",
+            "controller_exception", "signaled_without_controller_termination"}),
+        worker_exit_code=number(worker.get("observed_exit_code")),
+        worker_cleanup=choice(worker.get("cleanup"), {"observed_empty", "not_observed", "incomplete"}),
+        worker_cleanup_exit_code=number(cleanup.get("exit_code")), worker_empty_job=boolean(cleanup.get("empty_job")))
+    encoded = json.dumps(value, sort_keys=True, ensure_ascii=True, allow_nan=False, separators=(",", ":"))
+    return encoded if len(encoded) <= 4000 else '{"diagnostic_truncated":true}'
+
+
 @unittest.skipUnless(os.name == "nt", "Real Windows native evidence required")
 class ActiveAllocationTests(unittest.TestCase):
-    setUp = fixtures.ActiveGrantTests.setUp
+    def setUp(self):
+        if self._testMethodName != "test_heartbeat_progress_during_model_wait":
+            return fixtures.ActiveGrantTests.setUp(self)
+        import json
+        import subprocess
+        import test_safe_qwen_integration as integration
+        self._heartbeat_budget = 120
+        prepared = integration.IntegrationTests.prepared
+        def bounded(fixture, *args, **kwargs):
+            # Freeze one shared budget before configuration or run creation.
+            fixture.cfg["timeout_seconds"] = self._heartbeat_budget
+            fixture.data["unit_timeout_seconds"] = self._heartbeat_budget
+            fixture.path.write_text(json.dumps(fixture.cfg))
+            fixture.policy_path.write_text(json.dumps(fixture.data))
+            return prepared(fixture, *args, **kwargs)
+        with patch.object(integration.IntegrationTests, "prepared", bounded):
+            fixtures.ActiveGrantTests.setUp(self)
+        popen = subprocess.Popen
+        def inert_server(argv, *args, **kwargs):
+            if type(argv) is list and argv[-1] == "import time;time.sleep(60)":
+                argv = [*argv[:-1], f"import time;time.sleep({self._heartbeat_budget + 60})"]
+            return popen(argv, *args, **kwargs)
+        item = patch("subprocess.Popen", side_effect=inert_server)
+        item.start(); self.addCleanup(item.stop)
     prepare_timeout_fixture = fixtures.ActiveGrantTests.prepare_timeout_fixture
     stop_fixture = fixtures.ActiveGrantTests.stop_fixture
     servers = fixtures.ActiveGrantTests.servers
@@ -343,10 +423,28 @@ class ActiveAllocationTests(unittest.TestCase):
 
     def test_heartbeat_progress_during_model_wait(self):
         import test_safe_qwen_active_verification as native
-        self.run_first = lambda **kwargs: self.scheduler.allocate_safe_qwen_repair_recovery("safe-qwen-task", gateway=self.gateway, **kwargs)
+        import safe_qwen_active_eligibility as eligibility
+        import time
+        observed = {"policy_calls": 0}
+        classify = eligibility.classify_for_grant
+        def observed_classification(owner):
+            observed["policy_calls"] += 1
+            observed.pop("decision", None); observed.pop("reason_code", None)
+            try:
+                decision = classify(owner)
+            finally:
+                observed["policy_clock"] = time.monotonic()
+            observed.update(decision=decision.decision, reason_code=decision.reason_code)
+            return decision
+        self.run_first = lambda **kwargs: self.scheduler.allocate_safe_qwen_repair_recovery(
+            "safe-qwen-task", gateway=self.gateway, **dict(kwargs, timeout_seconds=self._heartbeat_budget))
         self.pulse_frequently = lambda: native.ActiveVerificationTests.pulse_frequently(self)
-        native.ActiveVerificationTests.test_heartbeat_progress_during_startup_and_model_request(self)
-        self.assertEqual(next(iter(self.reload().state["repair_authorizations"].values()))["state"], "CONSUMED")
+        try:
+            with patch.object(eligibility, "classify_for_grant", observed_classification):
+                native.ActiveVerificationTests.test_heartbeat_progress_during_startup_and_model_request(self)
+            self.assertEqual(next(iter(self.reload().state["repair_authorizations"].values()))["state"], "CONSUMED")
+        finally:
+            print("F3H_DIAGNOSTIC " + _allocation_diagnostic(self.store.state, observed, time.monotonic()), flush=True)
 
     def test_native_timeout_drains_verifier_and_descendant(self):
         import winprocess

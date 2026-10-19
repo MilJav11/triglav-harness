@@ -2,6 +2,7 @@
 import copy
 import json
 import os
+import time
 import unittest
 from unittest.mock import patch
 
@@ -80,12 +81,15 @@ class ActiveDispatchTests(unittest.TestCase):
     reload = fixtures.ActiveAllocationTests.reload
 
     def setUp(self):
+        self._fixture_started_clock = time.monotonic()
+        self._dispatch_budget = (300 if self._testMethodName ==
+            "test_heartbeat_advances_during_attempt_two_model_wait" else 180)
         prepared = integration.IntegrationTests.prepared
         def bounded(fixture, *args, **kwargs):
             # Explicit finite shared budget for TWO executions, pinned before
             # either run/identity exists; never extend an active deadline.
-            fixture.cfg["timeout_seconds"] = 180
-            fixture.data["unit_timeout_seconds"] = 180
+            fixture.cfg["timeout_seconds"] = self._dispatch_budget
+            fixture.data["unit_timeout_seconds"] = self._dispatch_budget
             if self._testMethodName == "test_heartbeat_advances_during_attempt_two_model_wait":
                 fixture.cfg["request_timeout_seconds"] = 30
             fixture.path.write_text(json.dumps(fixture.cfg))
@@ -96,14 +100,15 @@ class ActiveDispatchTests(unittest.TestCase):
         popen = subprocess.Popen
         def inert_server(argv, *args, **kwargs):
             if type(argv) is list and argv[-1] == "import time;time.sleep(60)":
-                argv = [*argv[:-1], "import time;time.sleep(240)"]
+                argv = [*argv[:-1], f"import time;time.sleep({self._dispatch_budget + 60})"]
             return popen(argv, *args, **kwargs)
         item = patch("subprocess.Popen", side_effect=inert_server)
         item.start(); self.addCleanup(item.stop)
         self.responses = [wire(self.submit), wire(self.edit), wire(self.submit)]
 
     def run_dispatch(self):
-        return self.scheduler.dispatch_safe_qwen_repair_recovery("safe-qwen-task", gateway=self.gateway, timeout_seconds=180)
+        return self.scheduler.dispatch_safe_qwen_repair_recovery("safe-qwen-task", gateway=self.gateway,
+                                                               timeout_seconds=self._dispatch_budget)
 
     def test_one_second_worker_repairs_file_and_stops_unverified(self):
         import winprocess
@@ -174,18 +179,53 @@ class ActiveDispatchTests(unittest.TestCase):
         self.assertEqual(unit["attempts"][1]["outcome"], "error")
 
     def test_heartbeat_advances_during_attempt_two_model_wait(self):
-        import time
+        import supervised_safe_qwen as adapter
+        import winprocess
         sampled = []
+        wait_clocks = []
         def delayed():
             self.assertFalse(self.store.mutex._is_owned())
             if self.store.state[active.KEY]["dispatch"] is not None and not sampled:
                 def count(): return sum((r.get("transition") or {}).get("event") == "controller_heartbeat" for r in self.store.records)
                 before = count()
+                wait_clocks.append(time.monotonic())
                 time.sleep(20)  # Below the preselected 30s request timeout.
+                wait_clocks.append(time.monotonic())
                 self.assertGreater(count(), before)
                 sampled.append(True)
         self.on_request = delayed
-        result = self.run_dispatch()
+        # Read-only clock observers delegate every call/argument unchanged. The
+        # cleanup span includes native drain, model unload and final WAL writes.
+        worker, terminate = adapter._run_worker, winprocess.ControllerVerifier.terminate_job
+        spans, current = [], []
+        def observed_worker(*args, **kwargs):
+            identity = kwargs["gateway"].recovery.identity
+            span = dict(started_clock=time.monotonic(), shared_started_clock=identity["started_clock"],
+                        deadline=identity["deadline"], timeout_argument_seconds=kwargs["timeout_seconds"])
+            spans.append(span); current.append(span)
+            try:
+                return worker(*args, **kwargs)
+            finally:
+                span["returned_clock"] = time.monotonic()
+                current.pop()
+        def observed_cleanup(native):
+            if current:
+                current[-1].setdefault("cleanup_started_clock", time.monotonic())
+            return terminate(native)
+        called = time.monotonic()
+        try:
+            with patch.object(adapter, "_run_worker", observed_worker), \
+                    patch.object(winprocess.ControllerVerifier, "terminate_job", observed_cleanup):
+                result = self.run_dispatch()
+        finally:
+            timing = dict(fixture_started_clock=self._fixture_started_clock, dispatch_called_clock=called,
+                          dispatch_returned_clock=time.monotonic(), shared_budget_seconds=self._dispatch_budget,
+                          config_budget_seconds=self.cfg["timeout_seconds"],
+                          unit_budget_seconds=self.worker_spec["limits"]["timeout_seconds"],
+                          request_timeout_seconds=self.cfg["request_timeout_seconds"],
+                          heartbeat_wait_clocks=wait_clocks[:2], worker_calls=len(spans), worker_spans=spans[:2])
+            encoded = json.dumps(timing, sort_keys=True, ensure_ascii=True, allow_nan=False, separators=(",", ":"))
+            print("F3G_TIMING " + (encoded if len(encoded) <= 4000 else '{"timing_truncated":true}'), flush=True)
         self.assertEqual(sampled, [True])
         self.assertEqual(result["dispatch"]["result"]["outcome"], "executor_succeeded_unverified",
                          msg=_dispatch_failure_diagnostic(result))
