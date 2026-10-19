@@ -17,16 +17,25 @@ REAL_CONSUME = durable.Store._consume_repair_grant
 
 @unittest.skipUnless(os.name == "nt", "Real Windows native evidence required")
 class ActiveGrantTests(unittest.TestCase):
+    WAL_BUDGET = 120
+    WAL_SCENARIOS = frozenset({
+        "test_failure_before_decision", "test_partial_initial_decision_refuses_reload",
+        "test_uncertain_decision_refuses_reload", "test_decision_without_grant_refuses_reload",
+        "test_uncertain_grant_loads_history_only", "test_torn_grant_refuses_reload",
+    })
+
     def setUp(self):
-        if self._testMethodName != "test_heartbeat_progress_during_owned_model_request":
+        self._grant_wal_budget = (self.WAL_BUDGET if type(self) is ActiveGrantTests
+            and self._testMethodName in self.WAL_SCENARIOS else None)
+        if self._testMethodName != "test_heartbeat_progress_during_owned_model_request" and self._grant_wal_budget is None:
             return fixtures.ActiveEligibilityTests.setUp(self)
         import json
         import subprocess
         import test_safe_qwen_integration as integration
-        self._heartbeat_budget = 120
+        self._heartbeat_budget = self._grant_wal_budget or 120
         prepared = integration.IntegrationTests.prepared
         def bounded(fixture, *args, **kwargs):
-            # Freeze the positive grant scenario's budget before either ledger.
+            # Freeze the native/verification/grant scenario before either ledger.
             fixture.cfg["timeout_seconds"] = self._heartbeat_budget
             fixture.data["unit_timeout_seconds"] = self._heartbeat_budget
             fixture.path.write_text(json.dumps(fixture.cfg))
@@ -41,6 +50,9 @@ class ActiveGrantTests(unittest.TestCase):
             return popen(argv, *args, **kwargs)
         item = patch("subprocess.Popen", side_effect=inert_server)
         item.start(); self.addCleanup(item.stop)
+        if self._grant_wal_budget is not None:
+            self.assertEqual(self.cfg["timeout_seconds"], self._grant_wal_budget)
+            self.assertEqual(self.worker_spec["limits"]["timeout_seconds"], self._grant_wal_budget)
     prepare_timeout_fixture = fixtures.ActiveEligibilityTests.prepare_timeout_fixture
     stop_fixture = fixtures.ActiveEligibilityTests.stop_fixture
     servers = fixtures.ActiveEligibilityTests.servers
@@ -48,6 +60,8 @@ class ActiveGrantTests(unittest.TestCase):
     reload = fixtures.ActiveEligibilityTests.reload
 
     def issue(self, **kwargs):
+        if self._grant_wal_budget is not None:
+            kwargs.setdefault("timeout_seconds", self._grant_wal_budget)
         return self.scheduler.authorize_safe_qwen_repair_recovery("safe-qwen-task", gateway=self.gateway, **kwargs)
 
     def failure(self):
@@ -249,33 +263,96 @@ class ActiveGrantTests(unittest.TestCase):
         self.assert_single()
 
     def fail_write(self, boundary, *, timing="after", torn=False):
+        import json
+        import time
+        from test_safe_qwen_active_allocation import _allocation_diagnostic
+        self.assertIn(boundary, ("decision", "grant"))
+        self.assertIn(timing, ("before", "after"))
+        self.assertIs(type(torn), bool)
         self.failure()
         append = self.store.append
         captured = []
+        reached = []
+        observed = {"policy_calls": 0}
+        classify = eligibility.classify_for_grant
+        expected_event = "repair_policy_b_decision" if boundary == "decision" else "state_committed"
+        reload_refused = torn or (boundary == "decision" and timing == "after") or (boundary == "grant" and timing == "before")
+        writes_refused, history_refused = False, None
+        reload_disposition = "unknown"
+        def classified(owner):
+            observed["policy_calls"] += 1
+            decision = classify(owner)
+            observed.update(decision=decision.decision, reason_code=decision.reason_code, policy_clock=time.monotonic())
+            return decision
+        def capture(stage):
+            captured.append((self.store.directory / "events.jsonl").read_bytes())
+            reached.append((expected_event, stage))
+            observed["fault_clock"] = time.monotonic()
         def faulty(event, **value):
             hit = (event == "repair_policy_b_decision" if boundary == "decision" else "repair_authorization" in value)
+            if hit:
+                self.assertEqual(event, expected_event)
+                if boundary == "grant":
+                    self.assertEqual(value["repair_authorization"]["event"], "repair_authorization_granted")
             if hit and timing == "before":
                 if torn:
                     with (self.store.directory / "events.jsonl").open("ab") as stream:
                         stream.write(b'{"event":')
-                captured.append((self.store.directory / "events.jsonl").read_bytes())
+                capture("before")
                 raise OSError("Fault before " + boundary)
             result = append(event, **value)
             if hit:
-                captured.append((self.store.directory / "events.jsonl").read_bytes())
+                capture("after")
                 raise OSError("Fault after " + boundary)
             return result
-        with patch.object(self.store, "append", side_effect=faulty), self.assertRaises(OSError): self.issue()
-        self.assertTrue(self.store._repair_write_failed)
-        self.assertIsNone(self.store._safe_qwen_active_controller)
-        self.assertEqual((self.store.directory / "events.jsonl").read_bytes(), captured[-1])
-        if torn or (boundary == "decision" and timing == "after") or (boundary == "grant" and timing == "before"):
-            with self.assertRaises(durable.DurableError): self.reload()
-        else:
-            loaded = self.reload()
-            self.assertIsNone(loaded._safe_qwen_active_controller)
-            self.assertEqual(len(loaded.state["work_units"]["units"]["safe-qwen-task"]["attempts"]), 1)
-            self.assertEqual("repair_authorizations" in loaded.state, boundary == "grant")
+        try:
+            with patch.object(eligibility, "classify_for_grant", side_effect=classified), \
+                    patch.object(self.store, "append", side_effect=faulty), self.assertRaises(OSError): self.issue()
+            # An early DENY or unrelated OSError must not count as WAL coverage.
+            self.assertEqual(len(captured), 1)
+            self.assertEqual(reached, [(expected_event, timing)])
+            self.assertEqual(observed["policy_calls"], 1)
+            self.assertEqual(observed.get("decision"), "ALLOW")
+            self.assertEqual(observed.get("reason_code"), policy.ALLOW_VERIFIER_FAILURE)
+            self.assertTrue(self.store._repair_write_failed)
+            self.assertIsNone(self.store._safe_qwen_active_controller)
+            self.assertEqual((self.store.directory / "events.jsonl").read_bytes(), captured[-1])
+            with self.assertRaises(durable.DurableError): self.store.append("after_uncertain_grant")
+            with self.assertRaises(durable.DurableError): self.sup.heartbeat()
+            self.assertTrue((self.store.directory / "events.jsonl").read_bytes() == captured[-1], "Refused writes changed WAL")
+            writes_refused = True
+            data = self.store.state[active.KEY]
+            self.assertTrue(data["result"]["cleanup_proof"]["empty_job"])
+            self.assertEqual(data["verification"]["observations"]["check-1"]["native"]["cleanup"], "observed_empty")
+            self.assertIsNone(self.sup.failure)
+            if reload_refused:
+                with self.assertRaises(durable.DurableError): self.reload()
+                reload_disposition = "refused"
+            else:
+                loaded = self.reload()
+                self.assertIsNone(loaded._safe_qwen_active_controller)
+                self.assertEqual(len(loaded.state["work_units"]["units"]["safe-qwen-task"]["attempts"]), 1)
+                self.assertEqual("repair_authorizations" in loaded.state, boundary == "grant")
+                payload = next(iter(loaded.state.get("repair_authorizations", {}).values()), {})
+                with self.assertRaises(durable.DurableError): loaded._issue_ai_repair_grant(payload)
+                with self.assertRaises(durable.DurableError): REAL_CONSUME(loaded, payload)
+                self.assertIsNone(loaded.state["last_verified_checkpoint"])
+                self.assertNotIn("repair_dispatch", loaded.state)
+                history_refused = True
+                reload_disposition = "history_only" if boundary == "grant" else "pre_grant_history"
+            self.assertTrue((self.store.directory / "events.jsonl").read_bytes() == captured[-1], "Reload or denied authority changed WAL")
+        finally:
+            # Reuse the reviewed closed serializer; no raw WAL/exception payload.
+            diagnostic = json.loads(_allocation_diagnostic(self.store.state, observed, time.monotonic()))
+            at_fault = json.loads(_allocation_diagnostic(self.store.state, observed, observed.get("fault_clock")))
+            diagnostic.update(wal_boundary=boundary, wal_event=reached[-1][0] if reached else "unknown",
+                wal_stage=reached[-1][1] if reached else "unknown", wal_torn=torn,
+                wal_injection_count=len(captured), subsequent_writes_refused=writes_refused,
+                reload_disposition=reload_disposition, history_authority_refused=history_refused,
+                injection_clock=at_fault["observed_clock"], remaining_at_injection_seconds=at_fault["remaining_at_observation_seconds"])
+            encoded = json.dumps(diagnostic, sort_keys=True, allow_nan=False)
+            self.assertLessEqual(len(("GRANT_WAL_DIAGNOSTIC " + encoded).encode()), 4096)
+            print("GRANT_WAL_DIAGNOSTIC " + encoded, flush=True)
 
     def test_failure_before_decision(self): self.fail_write("decision", timing="before")
     def test_partial_initial_decision_refuses_reload(self): self.fail_write("decision", timing="before", torn=True)
