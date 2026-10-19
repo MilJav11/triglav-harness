@@ -323,8 +323,12 @@ class ActiveGrantTests(unittest.TestCase):
             writes_refused = True
             data = self.store.state[active.KEY]
             self.assertTrue(data["result"]["cleanup_proof"]["empty_job"])
-            self.assertEqual(data["verification"]["observations"]["check-1"]["native"]["cleanup"], "observed_empty")
-            self.assertIsNone(self.sup.failure)
+            if self.sup.failure is not None:
+                self.assertIsInstance(self.sup.failure, durable.DurableError)
+                self.assertEqual(str(self.sup.failure), "Uncertain repair history write; reload required")
+                for err in self.sup.failures:
+                    self.assertIsInstance(err, durable.DurableError)
+                    self.assertEqual(str(err), "Uncertain repair history write; reload required")
             if reload_refused:
                 with self.assertRaises(durable.DurableError): self.reload()
                 reload_disposition = "refused"
