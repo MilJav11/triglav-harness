@@ -3334,7 +3334,7 @@
     "tests/test_safe_qwen_active_eligibility.py": "ca3942c7922d5a227713414e6264a5de1c244a9eb10cd0530cc1f22b57bf633b",
     "tests/test_safe_qwen_active_first.py": "f05a2990394a877278d0b6cc464273dd88b93f2302db810b512f3b1e3017d333",
     "tests/test_safe_qwen_active_grant.py": "62070186b4b2b5f9d73df9a5f63aeca87f95b88a75ef6c34f65c280d5bcb42f5",
-    "tests/test_safe_qwen_active_second_verification.py": "07b6d48c42274a6613b93e30cd6c821d215eac4fb1e33823294e0af84aa82f14",
+    "tests/test_safe_qwen_active_second_verification.py": "44097329ef5d22db1ce1f4cfd9d5d051a4d8885634d15d087db1d8de865785cf",
     "tests/test_safe_qwen_active_second_verification_crash.py": "fbd580f11d6f9dcf095ad8c3ffad59d1a88d747b374c4370540c1e3ee15ac8a8",
     "tests/test_safe_qwen_active_verification.py": "c24dc029f8b9b1503e6cad69103b2abe8b3f4975dc495882ef68d731b7559a2c",
     "tests/test_safe_qwen_hotpin_native.py": "f6777888e7ab72a176646f16d047c5c09acee38430fd4c92f0dda2b83ecef1e3",

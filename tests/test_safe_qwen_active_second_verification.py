@@ -1,8 +1,11 @@
 """ACTIVE v7: real Windows workers/Jobs/verifiers, deterministic fake Gateway only."""
+from contextlib import ExitStack
 import copy
 import json
+import math
 import os
 from pathlib import Path
+import time
 import unittest
 from unittest.mock import patch
 
@@ -16,6 +19,112 @@ import work_units
 import work_unit_scheduler
 import test_safe_qwen_active_dispatch as fixtures
 from test_supervised_safe_qwen import wire
+
+
+_ALLOWED_OUTCOMES = frozenset({"passed", "failed", "timeout"})
+_ALLOWED_VERIFIERS = frozenset({"check-1", "check-2"})
+_ALLOWED_TERMINATIONS = frozenset({"natural", "timeout", "forced", "observation_failed", "launch_failed"})
+_ALLOWED_TERMINATION_BASES = frozenset({
+    "signaled_without_controller_termination",
+    "controller_deadline",
+    "controller_cancel",
+})
+_ALLOWED_CLEANUPS = frozenset({"observed_empty", "incomplete", "not_observed"})
+
+
+def _allow(val, allowed, default="UNKNOWN"):
+    return val if type(val) is str and val in allowed else default
+
+
+def _num(val, digits=3):
+    return round(val, digits) if type(val) in (int, float) and math.isfinite(val) else "UNKNOWN"
+
+
+def _second_verification_diagnostic(case, result=None, error=None, wall_seconds=None):
+    """Sanitized diagnostic (<=4096 bytes) extracted from returned in-memory evidence."""
+    diag = {
+        "schema_version": 1,
+        "test_status": "FAIL" if error is not None else "PASS",
+        "error_type": type(error).__name__ if error is not None else None,
+        "wall_seconds": _num(wall_seconds, 3),
+        "second_verification_outcome": "UNKNOWN",
+        "verification_elapsed_seconds": "UNKNOWN",
+        "controller_deadline": "UNKNOWN",
+        "controller_deadline_margin_seconds": "UNKNOWN",
+        "timeout_owner": "UNKNOWN",
+        "verifier_observations": {},
+    }
+    try:
+        active_data = {}
+        store = getattr(case, "store", None)
+        if store is not None:
+            state = getattr(store, "state", None)
+            if isinstance(state, dict):
+                active_data = state.get(active.KEY) or {}
+
+        v = None
+        if isinstance(result, dict) and isinstance(result.get("verification"), dict):
+            v = result["verification"]
+        elif isinstance(active_data.get("second_verification"), dict):
+            v = active_data["second_verification"]
+
+        if isinstance(v, dict):
+            diag["second_verification_outcome"] = _allow(v.get("outcome"), _ALLOWED_OUTCOMES)
+            diag["verification_elapsed_seconds"] = _num(v.get("elapsed_seconds"), 3)
+
+            observations = v.get("observations")
+            if isinstance(observations, dict):
+                for vid, row in observations.items():
+                    if str(vid) not in _ALLOWED_VERIFIERS or not isinstance(row, dict):
+                        continue
+                    native = row.get("native") if isinstance(row.get("native"), dict) else {}
+                    out = row.get("output") if isinstance(row.get("output"), dict) else {}
+                    code = native.get("observed_exit_code")
+                    diag["verifier_observations"][str(vid)] = {
+                        "termination": _allow(native.get("termination"), _ALLOWED_TERMINATIONS),
+                        "termination_basis": _allow(native.get("termination_basis"), _ALLOWED_TERMINATION_BASES),
+                        "observed_exit_code": code if type(code) is int else "UNKNOWN",
+                        "cleanup": _allow(native.get("cleanup"), _ALLOWED_CLEANUPS),
+                        "duration_seconds": _num(out.get("duration_seconds"), 3),
+                    }
+
+            ident = active_data.get("identity") if isinstance(active_data.get("identity"), dict) else {}
+            deadline = ident.get("deadline")
+            checked = v.get("checked_clock")
+            if type(deadline) in (int, float) and math.isfinite(deadline):
+                diag["controller_deadline"] = _num(deadline, 3)
+                if type(checked) in (int, float) and math.isfinite(checked):
+                    margin = deadline - checked
+                    diag["controller_deadline_margin_seconds"] = _num(margin, 3)
+
+            outcome = diag["second_verification_outcome"]
+            if outcome == "passed":
+                diag["timeout_owner"] = "none"
+            elif outcome == "timeout":
+                margin_val = diag["controller_deadline_margin_seconds"]
+                if isinstance(margin_val, (int, float)) and margin_val <= 0:
+                    diag["timeout_owner"] = "controller_deadline"
+                else:
+                    diag["timeout_owner"] = "UNKNOWN"
+            else:
+                diag["timeout_owner"] = "UNKNOWN"
+    except Exception as parse_exc:
+        diag["diagnostic_extractor_error"] = type(parse_exc).__name__
+
+    try:
+        encoded = json.dumps(diag, sort_keys=True, separators=(",", ":"))
+        if len(encoded.encode("utf-8")) > 4096:
+            fallback = {
+                "schema_version": 1,
+                "test_status": diag["test_status"],
+                "second_verification_outcome": diag["second_verification_outcome"],
+                "truncated": True,
+            }
+            encoded = json.dumps(fallback, sort_keys=True, separators=(",", ":"))
+        return encoded
+    except Exception:
+        return '{"schema_version":1,"test_status":"UNKNOWN","fallback":true}'
+
 
 
 @unittest.skipUnless(os.name == "nt", "Real native Windows lifecycle required")
@@ -75,8 +184,27 @@ class SecondVerificationTests(unittest.TestCase):
                                        check=True, capture_output=True)
                     kwargs["verifier_registry"]["check-1"]["timeout_seconds"] = 90
             return create(store, repo, *args, **kwargs)
-        with patch("manager.create_run", side_effect=prepared), patch.object(integration.IntegrationTests, "prepared", bounded):
+        isolate_snapshot_heartbeat = self._testMethodName == "test_two_verifiers_take_complete_snapshots"
+        patches = [
+            patch("manager.create_run", side_effect=prepared),
+            patch.object(integration.IntegrationTests, "prepared", bounded),
+        ]
+        if isolate_snapshot_heartbeat:
+            # Isolate two-verifier snapshot semantics from periodic heartbeat churn.
+            # Real native verifiers and Job containment are preserved, while eliminating
+            # background heartbeat WAL inflation during multi-verifier snapshot evaluation.
+            orig_init = supervision.Supervisor.__init__
+            def sup_init(sup_self, *args, **kwargs):
+                orig_init(sup_self, *args, **kwargs)
+                sup_self._pulse_interval = 600
+            patches.append(patch.object(supervision.Supervisor, "__init__", sup_init))
+
+        with ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
             fixtures.ActiveDispatchTests.setUp(self)
+        if isolate_snapshot_heartbeat:
+            self.sup._pulse_interval = 600
         import subprocess
         popen = subprocess.Popen
         def inert_model(argv, *args, **kwargs):
@@ -204,13 +332,29 @@ class SecondVerificationTests(unittest.TestCase):
         self.assertEqual(self.reload().state["work_units"]["units"]["safe-qwen-task"]["status"], "UNIT_FAILED")
 
     def test_two_verifiers_take_complete_snapshots(self):
-        v = self.run_verified()["verification"]
-        self.assertEqual(list(v["observations"]), ["check-1", "check-2"])
-        self.assertEqual(v["outcome"], "passed")
-        self.assertEqual(v["before"], v["after"])
-        for row in v["observations"].values():
-            self.assertEqual(row["after"], v["before"])
-            self.assertEqual(row["files_after"], v["files_before"])
+        t0 = time.monotonic()
+        result = None
+        error = None
+        try:
+            result = self.run_verified()
+            v = result["verification"]
+            self.assertEqual(list(v["observations"]), ["check-1", "check-2"])
+            self.assertEqual(v["outcome"], "passed")
+            self.assertEqual(v["before"], v["after"])
+            for row in v["observations"].values():
+                self.assertEqual(row["after"], v["before"])
+                self.assertEqual(row["files_after"], v["files_before"])
+        except BaseException as exc:
+            error = exc
+            raise
+        finally:
+            try:
+                wall = time.monotonic() - t0
+                diag = _second_verification_diagnostic(self, result=result, error=error, wall_seconds=wall)
+                print(f"SECOND_VERIFICATION_DIAGNOSTIC {diag}", flush=True)
+            except BaseException:
+                pass
+
 
     def test_malformed_evidence_foreign_and_stale_wal_are_refused(self):
         self.run_verified(); state = self.reload().state
