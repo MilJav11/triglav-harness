@@ -442,6 +442,8 @@ class WorkUnitScheduler:
         )
         self.supervisor = supervisor
         self.clock = clock
+        self._policy_b_shadow_context = None
+        self._repair_controller = None
 
         # Fix 10 / Fix H: Require WorkUnit-compatible executor; validate if provided
         if agents is not None and (not hasattr(agents, "executor") or not callable(getattr(agents.executor, "execute", None))):
@@ -510,6 +512,9 @@ class WorkUnitScheduler:
 
     def guard_supervision(self):
         """Supervision check enforced at mandatory lifecycle boundaries (Fix 5, Fix D)."""
+        if ("safe_qwen_active_recovery" in self.store.state or "safe_qwen_recovery_identity" in self.store.state
+                or "repair_authorizations" in self.store.state or "repair_recovery" in self.store.state):
+            self._refuse_invocation_replay()
         if self.supervisor is not None:
             children = self.supervisor.reconcile()
             unknown = [c for c in children if c["state"] in ("UNKNOWN", "STARTING")]
@@ -585,9 +590,672 @@ class WorkUnitScheduler:
     def _persist_unit(self, section: dict, unit: dict):
         work_units.seal_unit_state(unit)
         work_units._reseal_section(section)
+        controller = self._repair_controller
+        if controller is not None and controller.verification_context is not None:
+            controller.verification_section = copy.deepcopy(section)
+            self.store._persist_repair_verification(controller)
+            return
         self._persist(section)
 
     # ----------------------------------------------------------------------- guarded verification (Fix D, Fix G, Fix A)
+
+    def _observation_context(self):
+        if self._repair_controller is not None:
+            self.store._require_repair_controller(self._repair_controller)
+            return self._repair_controller.verification_context or self._repair_controller.context
+        return self._policy_b_shadow_context
+
+    def _observation_key(self):
+        return "repair_observation" if self._repair_controller is not None else "policy_b_shadow"
+
+    def observe_safe_qwen_recovery_first(self, unit_id, *, gateway, timeout_seconds=30, cancel_event=None):
+        """Explicit ACTIVE v2 before Attempt 1; stop unverified, without grants."""
+        from safe_qwen_active_recovery import run
+        return run(self, unit_id, gateway=gateway, timeout_seconds=timeout_seconds, cancel_event=cancel_event)
+
+    def verify_safe_qwen_recovery_first(self, unit_id, *, gateway, timeout_seconds=30, cancel_event=None):
+        """Select ACTIVE v3 before Attempt 1; native verification, then review."""
+        from safe_qwen_active_recovery import run
+        return run(self, unit_id, gateway=gateway, timeout_seconds=timeout_seconds, cancel_event=cancel_event, verify=True)
+
+    def diagnose_safe_qwen_recovery_first(self, unit_id, *, gateway, timeout_seconds=30, cancel_event=None):
+        """Select before Attempt 1: ACTIVE v3 verification and diagnostic Policy B only.
+
+        The decision is returned, never persisted as authorization or resumed.
+        Existing v3 selections cannot be adopted by this continuous operation.
+        """
+        from safe_qwen_active_recovery import run
+        return run(self, unit_id, gateway=gateway, timeout_seconds=timeout_seconds,
+                   cancel_event=cancel_event, verify=True, diagnose=True)
+
+    def authorize_safe_qwen_repair_recovery(self, unit_id, *, gateway, timeout_seconds=30, cancel_event=None):
+        """Select ACTIVE v4 before Attempt 1; stop at one GRANTED, never consume."""
+        from safe_qwen_active_recovery import run
+        return run(self, unit_id, gateway=gateway, timeout_seconds=timeout_seconds,
+                   cancel_event=cancel_event, verify=True, grant=True)
+
+    def allocate_safe_qwen_repair_recovery(self, unit_id, *, gateway, timeout_seconds=30, cancel_event=None):
+        """Select ACTIVE v5 before Attempt 1; consume/allocate, never launch Attempt 2."""
+        from safe_qwen_active_recovery import run
+        return run(self, unit_id, gateway=gateway, timeout_seconds=timeout_seconds,
+                   cancel_event=cancel_event, verify=True, grant=True, allocate=True)
+
+    def dispatch_safe_qwen_repair_recovery(self, unit_id, *, gateway, timeout_seconds=30, cancel_event=None):
+        """Select ACTIVE v6 before Attempt 1; one second worker, stop unverified."""
+        from safe_qwen_active_recovery import run
+        return run(self, unit_id, gateway=gateway, timeout_seconds=timeout_seconds,
+                   cancel_event=cancel_event, verify=True, grant=True, allocate=True, dispatch=True)
+
+    def qualify_safe_qwen_repair_recovery(self, unit_id, *, gateway, timeout_seconds=30, cancel_event=None):
+        """Select ACTIVE v7 before Attempt 1; verify repaired Attempt 2, then review."""
+        from safe_qwen_active_recovery import run
+        return run(self, unit_id, gateway=gateway, timeout_seconds=timeout_seconds,
+                   cancel_event=cancel_event, verify=True, grant=True, allocate=True, dispatch=True, verify_second=True)
+
+    def authorize_repair_recovery(self, unit_id: str) -> dict:
+        """Explicit controller opt-in BEFORE Attempt 1; stop at GRANTED or refusal.
+
+        Accepts only a unit selector. No caller-supplied observations or grant
+        payloads are accepted, and a loaded mode can never recreate this session.
+        """
+        return self._run_repair_recovery(unit_id, allocate=False)
+
+    def allocate_repair_recovery(self, unit_id: str) -> dict:
+        """Opt in BEFORE Attempt 1 to consume/allocate continuously, never dispatch.
+
+        This cannot adopt a grant from authorize_repair_recovery() or a reload.
+        """
+        return self._run_repair_recovery(unit_id, allocate=True)
+
+    def dispatch_offline_repair_recovery(self, unit_id: str, script: dict, *, timeout_seconds=30) -> dict:
+        """Explicit BEFORE Attempt 1: fixed offline actions, one WAL-bound repair.
+
+        This phase stops after executor evidence. No Attempt 2 verifier, acceptance,
+        historical allocation adoption, live executor, or ordinary repair loop.
+        v1 integration supports mutation WorkUnits with exact file scopes only.
+        """
+        if type(script) is not dict:
+            raise WorkUnitSchedulingError("Offline dispatch requires a closed data-only script")
+        return self._run_repair_recovery(unit_id, allocate=True, offline_script=script, offline_timeout=timeout_seconds)
+
+    def _offline_first_actions(self, unit_id):
+        from offline_scripted_executor import validate_script, _json
+        if type(self.agents.executor) is not ScriptedExecutor or self.clock is not time.monotonic:
+            raise WorkUnitSchedulingError("Offline dispatch requires actual ScriptedExecutor and native monotonic clock")
+        executor = self.agents.executor
+        behavior = executor.rules.get((unit_id, 1), executor.rules.get((unit_id, None), executor.default_behavior))
+        if type(behavior) is not dict or set(behavior) != {"writes"} or type(behavior["writes"]) is not dict or not behavior["writes"]:
+            raise WorkUnitSchedulingError("Offline Attempt 1 permits only fixed bounded file writes; no callback")
+        actions = {"schema_version": 1, "actions": [dict(op="write", path=p, content=v) for p, v in behavior["writes"].items()]}
+        validate_script(actions, list(behavior["writes"]), [])
+        if len(_json(actions)) > 8192:
+            raise WorkUnitSchedulingError("Offline Attempt 1 input exceeds 8 KiB")
+        return copy.deepcopy(actions)
+
+    def qualify_offline_repair_recovery(self, unit_id: str, script: dict, *, timeout_seconds=30) -> dict:
+        """Select BEFORE Attempt 1: one offline repair and native qualification.
+
+        Pass/fail evidence stops for review and grants no checkpoint authority.
+        Existing dispatch-only operations cannot continue into this operation.
+        """
+        if type(script) is not dict:
+            raise WorkUnitSchedulingError("Offline qualification requires a closed data-only script")
+        return self._run_repair_recovery(unit_id, allocate=True, offline_script=script,
+                                        offline_timeout=timeout_seconds, verify=True)
+
+    def _run_repair_recovery(self, unit_id, *, allocate, offline_script=None, offline_timeout=30, verify=False):
+        from supervision import Supervisor, _validated_store
+        import environment
+        if os.name != "nt":
+            raise WorkUnitSchedulingError("Active recovery requires native Windows verification")
+        if self.reconciliation_stop is not None:
+            raise self.reconciliation_stop
+        self._refuse_invocation_replay()
+        try:
+            with self.store.mutex:
+                _validated_store(self.store)
+                from manager import validate_repository
+                validate_repository(self.store, self.repo)
+                if (not isinstance(self.supervisor, Supervisor) or self.supervisor.store is not self.store
+                        or self.agents is None or not callable(getattr(self.agents.executor, "execute", None))):
+                    raise WorkUnitSchedulingError("Active recovery requires controller Supervisor and executor")
+                self.supervisor.require_idle()
+                if (self.budgets != self.store.state["manager"]["budgets"]
+                        or self.parent_scope != self.store.state["manager"]["scope"]
+                        or self.verifier_registry != self.store.state["options"]["verifier_registry"]):
+                    raise WorkUnitSchedulingError("Active recovery contracts differ from WAL")
+                drift = environment.compare(self.store.state["environment"],
+                                            durable.current_fingerprint(self.store, executor=self.agents.executor))
+                if drift["decision"] not in {"MATCH", "INFORMATIONAL"}:
+                    raise WorkUnitSchedulingError("Active recovery environment preflight refused")
+                section = self.get_section()
+                unit = section["units"].get(unit_id)
+                if not unit or unit["attempts"]:
+                    raise WorkUnitSchedulingError("Active recovery requires an unattempted ready unit")
+                recipe = first_actions = None
+                if offline_script is not None:
+                    from offline_scripted_executor import validate_script, _json
+                    import math
+                    if unit["spec"]["mode"] != "mutation":
+                        raise WorkUnitSchedulingError("Offline repair dispatch requires a mutation WorkUnit")
+                    if type(offline_timeout) not in (int, float) or not math.isfinite(offline_timeout) or not 0 < offline_timeout <= 3600:
+                        raise WorkUnitSchedulingError("A finite offline timeout is required")
+                    first_actions = self._offline_first_actions(unit_id)
+                    allowed = copy.deepcopy(unit["spec"]["scope"]["allowed_paths"])
+                    forbidden = sorted(set(unit["spec"]["scope"]["forbidden_paths"] + self.parent_scope.get("forbidden_paths", [])))
+                    validate_script(offline_script, allowed, forbidden)
+                    validate_script(first_actions, allowed, forbidden)
+                    recipe = dict(script=copy.deepcopy(offline_script), allowed_paths=allowed, forbidden_paths=forbidden,
+                                  timeout_seconds=offline_timeout)
+                    if len(_json(recipe)) > 8192:
+                        raise WorkUnitSchedulingError("Complete repair input exceeds 8 KiB")
+                if unit not in self.evaluate_readiness(section):
+                    raise WorkUnitSchedulingError("Active recovery requires an unattempted ready unit")
+                self._repair_controller = (self.store._begin_repair_recovery(self, unit_id, allocate=True, offline_recipe=recipe, verify=verify) if recipe
+                                          else self.store._begin_repair_recovery(self, unit_id, allocate=True) if allocate
+                                          else self.store._begin_repair_recovery(self, unit_id))
+                if first_actions is not None and first_actions != self._offline_first_actions(unit_id):
+                    raise WorkUnitSchedulingError("Offline Attempt 1 recipe changed")
+            result = self.execute_attempt(unit, section, 1)
+            if not result.get("verification_complete"):
+                raise WorkUnitSchedulingError("Recovery observations incomplete; no grant issued")
+            if allocate:
+                # Keep the reviewed grant and allocation adjacent even when the
+                # Supervisor heartbeat is active. Both methods reuse this RLock.
+                with self.store.mutex:
+                    grant = self.store._issue_repair_grant(self._repair_controller)
+                    grant = self.store._consume_repair_grant(self._repair_controller)
+            else:
+                grant = self.store._issue_repair_grant(self._repair_controller)
+            if offline_script is not None:
+                from offline_scripted_executor import _run_controller_script
+                evidence = _run_controller_script(self._repair_controller)
+                verification = None
+                if verify and self.store.state["repair_dispatch"]["result"]["outcome"] == "executor_succeeded":
+                    verification = self._verify_offline_repair(self._repair_controller)
+                return {"repair_recovery": True, "authorization": grant, "executor_evidence": evidence,
+                        **({"verification": verification} if verify else {}),
+                        "dispatch": copy.deepcopy(self.store.state["repair_dispatch"]), "status": "HUMAN_ACTION_REQUIRED"}
+            return {"repair_recovery": True, "authorization": grant, "status": "HUMAN_ACTION_REQUIRED"}
+        finally:
+            if self._repair_controller is not None:
+                self._repair_controller.closed = True
+            self._repair_controller = None
+            self.reconciliation_stop = Stop("HUMAN_ACTION_REQUIRED", "REPAIR_RECOVERY_REVIEW_REQUIRED",
+                                            "Offline qualification ended; independent review and final acceptance gates remain required" if verify else
+                                            "Offline dispatch ended; native verification and acceptance require review" if offline_script is not None else
+                                            "Active allocation ended; executor dispatch is disabled" if allocate else
+                                            "Active recovery ended; no consumption or Attempt 2 is enabled")
+
+    def _guard_repair_verification(self, controller, active_child_id=None):
+        """Live authority and original cumulative deadlines, never replay data."""
+        import environment
+        import offline_scripted_executor as offline
+        from supervision import _validated_store
+        self.store._require_repair_controller(controller)
+        _validated_store(self.store)
+        state, mode = self.store.state, controller.mode
+        context, adapter = controller.verification_context, controller.dispatch
+        if (controller.scheduler is not self or mode.get("operation") != "OFFLINE_VERIFY"
+                or context is None or adapter is None or adapter.last_record is None
+                or adapter.last_record["state"]["repair_dispatch"] != state.get("repair_dispatch")
+                or adapter.data != state["repair_dispatch"]
+                or state["repair_dispatch"]["phase"] != "COMPLETE"
+                or state["repair_dispatch"]["result"]["outcome"] != "executor_succeeded"):
+            raise WorkUnitSchedulingError("No live completed dispatch for qualification")
+        live = state["supervision"]["controller"]
+        unit = state["work_units"]["units"][mode["unit_id"]]
+        first = unit["attempts"][0]
+        grant = state["repair_authorizations"]["repair-" + mode["recovery_id"]]
+        if (self._repair_controller is not controller or self.clock is not time.monotonic
+                or live["pid"] != os.getpid() or live["identity"] != durable.winprocess.identity(os.getpid())
+                or live["boot"] != durable.winprocess.boot_identity()
+                or self.supervisor.store is not self.store or str(self.repo.root) != state["target_repository"]
+                or self.budgets != state["manager"]["budgets"] or self.parent_scope != state["manager"]["scope"]
+                or self.verifier_registry != state["options"]["verifier_registry"]
+                or durable.digest(unit["spec"]) != mode["spec_sha256"] or offline._source_identity() != mode["offline_sources"]
+                or len(unit["attempts"]) != 2 or first["repair_observation"]["observations"] != controller.observations
+                or unit["attempts"][1]["attempt_id"] != context["attempt_id"] or unit["attempts"][1]["completed_at"] is not None):
+            raise WorkUnitSchedulingError("Qualification ownership/contracts changed")
+        drift = environment.compare(state["environment"], durable.current_fingerprint(self.store, executor=self.agents.executor))
+        if drift["decision"] not in {"MATCH", "INFORMATIONAL"}:
+            raise WorkUnitSchedulingError("Qualification environment drift")
+        if (self._shadow_snapshot() != context["candidate_snapshot"]
+                or self._shadow_fs_snapshot() != context["candidate_fs_snapshot"]
+                or hashlib.sha256(offline._json(offline._snapshot(Path(self.repo.root)))).hexdigest() != adapter.evidence["after_snapshot_sha256"]):
+            raise WorkUnitSchedulingError("Qualification candidate/scope drift")
+        if self.clock() >= min(mode["task_deadline"], grant["budget"]["unit_deadline"]):
+            raise WorkUnitSchedulingError("Qualification cumulative budget exhausted")
+        if active_child_id is None:
+            self.supervisor.require_idle()
+        else:
+            own_child = self.supervisor.child(active_child_id)
+            children = [self.supervisor.observe(c) for c in state["supervision"]["children"].values() if c["child_id"] != active_child_id]
+            own = own_child if own_child["invocation"]["phase"] == "INTENT" else self.supervisor.observe(own_child)
+            if (own["state"] not in {"STARTING", "RUNNING"}
+                    or (own["state"] == "STARTING" and (own["invocation"]["phase"] != "INTENT" or own["pid"] is not None))
+                    or own["invocation"]["attempt_id"] != context["attempt_id"]
+                    or own["invocation"]["unit_id"] != context["unit_id"]
+                    or any(c["child_id"] != active_child_id and c["state"] in {"STARTING", "RUNNING", "STOPPING", "UNKNOWN"} for c in children)):
+                raise WorkUnitSchedulingError("Qualification process ownership ambiguous")
+
+    def _verify_offline_repair(self, controller):
+        """Seed once, then reuse the approved native sequence and observation binding."""
+        with self.store.mutex:
+            self.store._require_repair_controller(controller)
+            if controller.verification_context is not None or "repair_verification" in self.store.state:
+                raise WorkUnitSchedulingError("Qualification cannot be adopted or repeated")
+            section = self.get_section()
+            unit = section["units"][controller.mode["unit_id"]]
+            att = unit["attempts"][1]
+            # An effective budget origin: first + second elapsed time equals the
+            # uninterrupted unit interval, including grant/dispatch overhead.
+            # The historical first attempt's clock and evidence never change.
+            att["started_at_clock"] = controller.mode["started_clock"] + unit["attempts"][0]["timeout_info"]["elapsed_seconds"]
+            candidate, fs = self._shadow_snapshot(), self._shadow_fs_snapshot()
+            controller.verification_context = {**copy.deepcopy(controller.context), "attempt_id": att["attempt_id"],
+                "started_clock": att["started_at_clock"], "candidate_snapshot": candidate, "candidate_fs_snapshot": fs}
+            self._guard_repair_verification(controller)
+            from offline_scripted_executor import _snapshot
+            controller.verification_context["tree_snapshot"] = _snapshot(Path(self.repo.root))
+            att["repair_observation"] = dict(policy="B", mode="ACTIVE", phase="STARTED", observations={},
+                registry_sha256=controller.mode["registry_sha256"], candidate_snapshot=candidate, candidate_fs_snapshot=fs)
+            self._persist_unit(section, unit)  # Qualification intent before any native invocation.
+        result = self._run_policy_b_shadow_verification(unit, section, att["attempt_id"], 0)
+        completed = self.store.state["work_units"]["units"][unit["unit_id"]]["attempts"][1]
+        return {**result, "outcome": completed["outcome"], "failure_classification": completed["failure_classification"]}
+
+    def _fresh_repair_classification(self, controller):
+        """Revalidate the live controller and every frozen input, then classify."""
+        from supervision import _validated_store
+        from retry_eligibility import classify_retry_eligibility
+        import environment
+        self.store._require_repair_controller(controller)
+        _validated_store(self.store)
+        self.supervisor.require_idle()
+        state = self.store.state
+        mode = state["repair_recovery"]
+        durable.validate_repair_recovery(state)
+        live = state["supervision"]["controller"]
+        if (live["pid"] != os.getpid() or live["identity"] != durable.winprocess.identity(os.getpid())
+                or live["boot"] != durable.winprocess.boot_identity()
+                or self.budgets != state["manager"]["budgets"] or self.parent_scope != state["manager"]["scope"]
+                or self.verifier_registry != state["options"]["verifier_registry"]):
+            raise WorkUnitSchedulingError("Recovery controller/session/contracts changed")
+        unit = copy.deepcopy(state["work_units"]["units"][mode["unit_id"]])
+        att = unit["attempts"][0]
+        candidate = att["candidate_snapshot"]
+        if (unit["status"] != "VERIFYING" or att["completed_at"] is None
+                or self._shadow_snapshot() != candidate
+                or self._shadow_fs_snapshot() != att["repair_observation"]["candidate_fs_snapshot"]):
+            raise WorkUnitSchedulingError("Recovery candidate/attempt changed")
+        elapsed = self.clock() - att["started_at_clock"]
+        if elapsed < 0 or self.clock() >= mode["task_deadline"]:
+            raise WorkUnitSchedulingError("Recovery deadline exhausted or clock ambiguous")
+        drift = environment.compare(state["environment"], durable.current_fingerprint(self.store, executor=self.agents.executor))
+        if drift["decision"] not in {"MATCH", "INFORMATIONAL"}:
+            raise WorkUnitSchedulingError("Recovery environment changed")
+        for entry in att["verifier_result"].values():
+            entry["controller_evidence"].update(run_id=state["run_id"], unit_id=mode["unit_id"],
+                                                attempt_id=mode["source_attempt_id"])
+        revision, sequence = state["revision"], len(self.store.records)
+        decision = classify_retry_eligibility(
+            unit, policy="B", supervisor=self.supervisor, require_idle=True, verifier_registry=self.verifier_registry,
+            environment_status="SAFE", remaining_unit_budget=self.remaining_unit_budget(unit, elapsed, att["attempt_id"]),
+            remaining_task_budget=self.remaining_task_budget(), candidate_snapshot=candidate,
+            verification_snapshot_before=att["verification_snapshot_before"],
+            verification_snapshot_after=att["verification_snapshot_after"], repo_mutated_during_verification=False,
+            context={"run_id": state["run_id"]})
+        if revision != self.store.state["revision"] or sequence != len(self.store.records):
+            raise WorkUnitSchedulingError("Classifier changed WAL; grant refused")
+        _validated_store(self.store)
+        durable.validate_repair_recovery(self.store.state)
+        live_after = self.store.state["supervision"]["controller"]
+        drift_after = environment.compare(self.store.state["environment"], durable.current_fingerprint(
+            self.store, executor=self.agents.executor))
+        if (live_after["pid"] != os.getpid() or live_after["identity"] != durable.winprocess.identity(os.getpid())
+                or live_after["boot"] != durable.winprocess.boot_identity()
+                or self.budgets != self.store.state["manager"]["budgets"]
+                or self.parent_scope != self.store.state["manager"]["scope"]
+                or self.verifier_registry != self.store.state["options"]["verifier_registry"]
+                or drift_after["decision"] not in {"MATCH", "INFORMATIONAL"}):
+            raise WorkUnitSchedulingError("Recovery inputs changed during classification")
+        if (self._shadow_snapshot() != candidate
+                or self._shadow_fs_snapshot() != att["repair_observation"]["candidate_fs_snapshot"]
+                or self.clock() >= mode["task_deadline"] or self.remaining_task_budget() < 1
+                or self.remaining_unit_budget(unit, self.clock() - att["started_at_clock"], att["attempt_id"]) < 1):
+            raise WorkUnitSchedulingError("Recovery candidate/budget changed during classification")
+        return decision
+
+    def observe_policy_b_shadow(self, unit_id: str) -> dict:
+        """Trusted controller opt-in: execute one first attempt, diagnose, then stop.
+
+        Never enters execute_unit's repair loop or accepts verification progress.
+        The ephemeral context permits only this uninterrupted verifier sequence;
+        the durable attempt marker refuses recovery even before native creation.
+        """
+        from supervision import Supervisor, _validated_store
+        if os.name != "nt":
+            raise WorkUnitSchedulingError("Policy B shadow observation requires Windows")
+        if self.reconciliation_stop is not None:
+            raise self.reconciliation_stop
+        self._refuse_invocation_replay()
+        try:
+            with self.store.mutex:
+                _validated_store(self.store)
+                from manager import validate_repository
+                validate_repository(self.store, self.repo)
+                if not isinstance(self.supervisor, Supervisor) or self.supervisor.store is not self.store:
+                    raise WorkUnitSchedulingError("Shadow observation requires this run's Supervisor")
+                self.supervisor.require_idle()
+                if self.agents is None or not callable(getattr(self.agents.executor, "execute", None)):
+                    raise WorkUnitSchedulingError("Shadow observation requires an explicit executor")
+                if (self.budgets != self.store.state["manager"]["budgets"]
+                        or self.parent_scope != self.store.state["manager"]["scope"]):
+                    raise WorkUnitSchedulingError("Shadow scope/budgets differ from approved WAL state")
+                import environment
+                drift = environment.compare(self.store.state["environment"], durable.current_fingerprint(
+                    self.store, executor=self.agents.executor))
+                if drift["decision"] not in {"MATCH", "INFORMATIONAL"}:
+                    raise WorkUnitSchedulingError("Shadow environment preflight refused")
+                registry = copy.deepcopy(self.store.state["options"].get("verifier_registry"))
+                if type(registry) is not dict or registry != self.verifier_registry:
+                    raise WorkUnitSchedulingError("Shadow registry differs from approved WAL registry")
+                section = self.get_section()
+                unit = section["units"].get(unit_id)
+                if not unit or unit["attempts"] or unit not in self.evaluate_readiness(section):
+                    raise WorkUnitSchedulingError("Shadow observation requires an unattempted ready WorkUnit")
+                self._policy_b_shadow_context = {
+                    "unit_id": unit_id, "attempt_id": f"{unit_id}-attempt-1", "registry": registry,
+                    "spec_sha256": durable.digest(unit["spec"]), "started_clock": self.clock(),
+                }
+            result = self.execute_attempt(unit, section, 1)
+            if not result.get("policy_b_shadow"):
+                # Executor/scope failures are not verifier evidence. Preserve the
+                # existing sealed failure; do not enter repair or manufacture it.
+                return {"policy_b_shadow": True, "verification_complete": False,
+                        "executor_failure": result}
+            return result
+        finally:
+            self._policy_b_shadow_context = None
+            self.reconciliation_stop = Stop("HUMAN_ACTION_REQUIRED", "INVOCATION_REVIEW_REQUIRED",
+                                            "Policy B shadow observation requires independent review")
+
+    def _shadow_snapshot(self):
+        from retry_eligibility import validate_normalize_snapshot
+        value = snapshot(self.repo)
+        _, error = validate_normalize_snapshot(value, "controller capture")
+        if error is not None:
+            raise WorkUnitSchedulingError("Incomplete canonical shadow snapshot")
+        return value
+
+    def _shadow_fs_snapshot(self):
+        value = capture_fs_snapshot(self.repo.root)
+        if not value or any(info is None for info in value.values()):
+            raise WorkUnitSchedulingError("Incomplete filesystem shadow snapshot")
+        return value
+
+    def _bind_shadow_observation(self, invocation, result, candidate):
+        """Authenticate the pre-launch WAL chain, then adapt a detached native record.
+
+        Invocation/token/sequence references stay outside the closed native schema.
+        Classifier-required IDs label authenticated facts, never authenticate JSON.
+        """
+        from supervision import _validated_store
+        with self.store.mutex:
+            _validated_store(self.store)
+            child = self.supervisor.child(invocation.child_id)
+            intent = child["invocation"]
+            expected = {**invocation.intent, "phase": "COMPLETE"}
+            native = copy.deepcopy(result["controller_evidence"])
+            if (intent != expected or intent["candidate_fingerprint"] != candidate["fingerprint"]
+                    or child["run_id"] != self.store.state["run_id"] or child["state"] != "EXITED"
+                    or native.get("child_id") != invocation.child_id or native.get("job") != child["job"]
+                    or native.get("verifier") != {"pid": child["pid"], "identity": child["identity"]}
+                    or native.get("observed_exit_code") != child["exit_code"]
+                    or native.get("intended_argv") != intent["intended_argv"]
+                    or native.get("resolved_argv") != intent["resolved_argv"]
+                    or native.get("resolved_command_sha256") != child["command_sha256"]
+                    or native.get("cleanup") != "observed_empty" or native.get("execution_started") is not True
+                    or any(k in native for k in ("run_id", "unit_id", "attempt_id", "invocation_id", "verifier_id"))):
+                raise WorkUnitSchedulingError("Foreign or incomplete native invocation observation")
+            events = ("invocation_intent", "invocation_bound", "invocation_release", "process_exit", "invocation_complete")
+            records = [r for r in self.store.records if (r.get("transition") or {}).get("child_id") == child["child_id"]
+                       and (r.get("transition") or {}).get("event") in events]
+            if [r["transition"]["event"] for r in records] != list(events):
+                raise WorkUnitSchedulingError("Missing or replayed invocation WAL lifecycle")
+            binding = {"child_id": child["child_id"], "invocation_id": child["token"],
+                       "wal": {r["transition"]["event"]: r["sequence"] for r in records}}
+            evidence = {**native, "run_id": child["run_id"], "unit_id": intent["unit_id"],
+                        "attempt_id": intent["attempt_id"]}
+            entry = {"argv": copy.deepcopy(intent["intended_argv"]), "exit_code": child["exit_code"],
+                     "passed": native["termination"] == "natural" and child["exit_code"] == 0,
+                     "controller_evidence": evidence}
+            return {"binding": binding, "native": native}, entry
+
+    def _run_policy_b_shadow_verification(self, unit, section, attempt_id, attempt_elapsed):
+        import environment
+        from retry_eligibility import classify_retry_eligibility, POLICY_B
+        from supervision import _VerifierInvocation, _run_observed_verifier, _validated_store
+        context = self._observation_context()
+        if (context is None or context["unit_id"] != unit["unit_id"] or context["attempt_id"] != attempt_id
+                or durable.digest(unit["spec"]) != context["spec_sha256"]):
+            raise WorkUnitSchedulingError("Shadow sequence has no current controller context")
+        att = next(a for a in unit["attempts"] if a["attempt_id"] == attempt_id)
+        active = self._repair_controller is not None
+        second = active and self._repair_controller.verification_context is not None
+        shadow = att[self._observation_key()]
+        self.supervisor.require_idle()
+        candidate = shadow["candidate_snapshot"]
+        work_units.transition_unit(unit, "VERIFYING")
+        if second:
+            att["stage"] = "verifying"
+        started = self.clock()
+        attempt_elapsed = started - att["started_at_clock"]
+        att["stage_timing"] = dict(stage="VERIFYING", unit_id=unit["unit_id"], attempt_id=attempt_id,
+                                   stage_start_clock=started, stage_start_runtime=self.runtime(),
+                                   attempt_elapsed_at_start=attempt_elapsed)
+        shadow["phase"] = "OBSERVING"
+        self._persist_unit(section, unit)
+        shadow["verification_snapshot_before"] = self._shadow_snapshot()
+        fs_before = self._shadow_fs_snapshot()
+        shadow["verification_fs_snapshot_before"] = fs_before
+        if second:
+            from offline_scripted_executor import _snapshot, _json
+            def tree_hash():
+                return hashlib.sha256(_json(_snapshot(Path(self.repo.root)))).hexdigest()
+            shadow["verification_tree_before_sha256"] = tree_hash()
+        results = {}
+        contaminated = (shadow["verification_snapshot_before"] != candidate
+                        or fs_before != shadow["candidate_fs_snapshot"])
+        if second:
+            contaminated = contaminated or shadow["verification_tree_before_sha256"] != self.store.state["repair_verification"]["tree_sha256"]
+        self._persist_unit(section, unit)
+        for vid in unit["spec"]["verifier_ids"]:
+            if contaminated:
+                break
+            with self.store.mutex:
+                _validated_store(self.store)
+                if (self.store.state["options"]["verifier_registry"] != context["registry"]
+                        or self.verifier_registry != context["registry"]
+                        or self._shadow_snapshot() != candidate or self._shadow_fs_snapshot() != fs_before):
+                    contaminated = True
+                    break
+                # This sequence retains its original context. Construction is
+                # checked against it BEFORE any native child can be created.
+                invocation = (_VerifierInvocation(self, unit["unit_id"], attempt_id, vid, _repair_controller=self._repair_controller)
+                              if second else _VerifierInvocation(self, unit["unit_id"], attempt_id, vid))
+                if (invocation.intent["registry_sha256"] != shadow["registry_sha256"]
+                        or invocation.intent["spec_sha256"] != context["spec_sha256"]
+                        or invocation.intent["candidate_fingerprint"] != candidate["fingerprint"]):
+                    raise WorkUnitSchedulingError("Invocation diverged from frozen shadow sequence")
+            result = _run_observed_verifier(
+                self.supervisor, invocation.intent["resolved_argv"], invocation.intent["intended_argv"],
+                self.repo.root, invocation.intent["deadline"] - self.clock(),
+                self.repo.config["max_output_chars"], invocation=invocation)
+            observation, entry = self._bind_shadow_observation(invocation, result, candidate)
+            observation["after_snapshot"] = self._shadow_snapshot()
+            observation["after_fs_snapshot"] = self._shadow_fs_snapshot()
+            if second:
+                observation["after_tree_sha256"] = tree_hash()
+            shadow["observations"][vid] = observation
+            if active:
+                if second:
+                    self._repair_controller.verification_observations = copy.deepcopy(shadow["observations"])
+                else:
+                    self._repair_controller.observations = copy.deepcopy(shadow["observations"])
+            results[vid] = entry
+            contaminated = (observation["after_snapshot"] != candidate or observation["after_fs_snapshot"] != fs_before)
+            if second:
+                contaminated = contaminated or observation["after_tree_sha256"] != shadow["verification_tree_before_sha256"]
+            self._persist_unit(section, unit)
+            if result["termination"] != "natural":
+                break
+        shadow["verification_snapshot_after"] = self._shadow_snapshot()
+        shadow["verification_fs_snapshot_after"] = self._shadow_fs_snapshot()
+        if second:
+            shadow["verification_tree_after_sha256"] = tree_hash()
+        contaminated = (contaminated or shadow["verification_snapshot_after"] != candidate
+                        or shadow["verification_fs_snapshot_after"] != fs_before)
+        if second:
+            contaminated = contaminated or shadow["verification_tree_after_sha256"] != shadow["verification_tree_before_sha256"]
+        elapsed = attempt_elapsed + self.clock() - started
+        timed_out = any(o["native"]["termination"] == "timeout" for o in shadow["observations"].values())
+        failed = len(results) != len(unit["spec"]["verifier_ids"]) or any(not r["passed"] for r in results.values())
+        outcome = "timeout" if timed_out else "failed" if failed or contaminated else "passed"
+        failure = ("verifier_timeout" if timed_out else "verifier_tampered_repo" if contaminated
+                   else "verification_failed" if failed else None)
+        drift = environment.compare(self.store.state["environment"], durable.current_fingerprint(
+            self.store, executor=self.agents.executor))
+        shadow["environment_comparison"] = drift
+        if second:
+            if drift["decision"] not in {"MATCH", "INFORMATIONAL"}:
+                raise WorkUnitSchedulingError("Qualification environment changed during verification")
+            grant = self.store.state["repair_authorizations"]["repair-" + self._repair_controller.mode["recovery_id"]]
+            if self.clock() >= min(self._repair_controller.mode["task_deadline"], grant["budget"]["unit_deadline"]):
+                outcome, failure = "timeout", "verifier_timeout"
+        environment_status = "SAFE" if drift["decision"] in {"MATCH", "INFORMATIONAL"} else drift
+        # Evaluate only a detached observation projection. This does not authorize
+        # a WorkUnit state transition, repair, final verification or checkpoint.
+        projected = copy.deepcopy(unit)
+        next(a for a in projected["attempts"] if a["attempt_id"] == attempt_id).update(
+            outcome=outcome, failure_classification=failure, verifier_result=results,
+            candidate_snapshot=candidate, verification_snapshot_before=shadow["verification_snapshot_before"],
+            verification_snapshot_after=shadow["verification_snapshot_after"],
+            timeout_info={"elapsed_seconds": elapsed})
+        with self.store.mutex:
+            _validated_store(self.store)
+            self.supervisor.require_idle()
+            if (self._shadow_snapshot() != shadow["verification_snapshot_after"]
+                    or self._shadow_fs_snapshot() != shadow["verification_fs_snapshot_after"]):
+                raise WorkUnitSchedulingError("Candidate drift before shadow classification")
+            elapsed = self.clock() - att["started_at_clock"]
+            revision, sequence = self.store.state["revision"], len(self.store.records)
+            decision = None if active else classify_retry_eligibility(
+                projected, policy=POLICY_B, supervisor=self.supervisor, require_idle=True,
+                verifier_registry=context["registry"], environment_status=environment_status,
+                remaining_unit_budget=self.remaining_unit_budget(unit, elapsed, attempt_id),
+                remaining_task_budget=self.remaining_task_budget(),
+                candidate_snapshot=candidate, verification_snapshot_before=shadow["verification_snapshot_before"],
+                verification_snapshot_after=shadow["verification_snapshot_after"],
+                repo_mutated_during_verification=contaminated,
+                context={"run_id": self.store.state["run_id"]})
+            # The frozen classifier catches Supervisor errors. It must not hide
+            # an uncertain WAL write and induce a diagnostic follow-up append.
+            if self.store.state["revision"] != revision or len(self.store.records) != sequence:
+                raise WorkUnitSchedulingError("Classifier changed WAL; diagnostic persistence refused")
+            _validated_store(self.store)
+            if (self._shadow_snapshot() != shadow["verification_snapshot_after"]
+                    or self._shadow_fs_snapshot() != shadow["verification_fs_snapshot_after"]):
+                raise WorkUnitSchedulingError("Candidate drift during shadow classification")
+            if second:
+                drift = environment.compare(self.store.state["environment"], durable.current_fingerprint(self.store, executor=self.agents.executor))
+                if drift["decision"] not in {"MATCH", "INFORMATIONAL"} or tree_hash() != shadow["verification_tree_after_sha256"]:
+                    raise WorkUnitSchedulingError("Qualification environment/tree drift before outcome seal")
+            shadow.update(phase="OBSERVATIONS_COMPLETE" if active else "DIAGNOSTIC_COMPLETE",
+                          decision=None if active else decision.to_dict(),
+                          verification_complete=len(results) == len(unit["spec"]["verifier_ids"]))
+            if active:
+                att.update(candidate_snapshot=candidate, verification_snapshot_before=shadow["verification_snapshot_before"],
+                           verification_snapshot_after=shadow["verification_snapshot_after"])
+                results = copy.deepcopy(results)
+                for vid, entry in results.items():
+                    entry["controller_evidence"] = copy.deepcopy(shadow["observations"][vid]["native"])
+            work_units.complete_attempt(unit, attempt_id, outcome=outcome,
+                                        execution_result=att["execution_result"] if second else None,
+                                        failure_classification=failure, verifier_result=results,
+                                        changed_paths=att["changed_paths"],
+                                        timeout_info={"elapsed_seconds": self.clock() - att["started_at_clock"]})
+            if second and outcome != "passed":
+                work_units.transition_unit(unit, "UNIT_FAILED")
+            self._persist_unit(section, unit)
+        return {"repair_recovery" if active else "policy_b_shadow": True,
+                "decision": None if active else decision.to_dict(),
+                "verification_complete": shadow["verification_complete"], "unit_id": unit["unit_id"]}
+
+    def invoke_native_verifier(self, unit_id: str, attempt_id: str, verifier_id: str) -> dict:
+        """Explicit foundation-only opt-in. No retry, result acceptance or resume.
+
+        Requires an already WAL-persisted VERIFYING first attempt and its timing.
+        All command, candidate and budget facts are derived by the controller;
+        callers select identifiers only, never supply an invocation record.
+        """
+        from supervision import _VerifierInvocation, _run_observed_verifier
+        if os.name != "nt":
+            raise WorkUnitSchedulingError("Native invocation requires Windows")
+        if self.reconciliation_stop is not None:
+            raise self.reconciliation_stop
+        try:
+            invocation = _VerifierInvocation(self, unit_id, attempt_id, verifier_id)
+            result = _run_observed_verifier(
+                self.supervisor, invocation.intent["resolved_argv"], invocation.intent["intended_argv"],
+                self.repo.root, invocation.intent["deadline"] - self.clock(),
+                self.repo.config["max_output_chars"], invocation=invocation)
+            self._persist_runtime()
+            return result
+        finally:
+            # This slice cannot settle a WorkUnit or authorize another attempt.
+            # On failure, keep durable stage timing/deadline and make no further
+            # append after a possibly uncertain WAL write.
+            self.reconciliation_stop = Stop("HUMAN_ACTION_REQUIRED", "INVOCATION_REVIEW_REQUIRED",
+                                            "Native invocation requires review; WorkUnit integration is not enabled")
+
+    def _refuse_invocation_replay(self):
+        """Do not let legacy recovery/dispatch relaunch a foundation invocation."""
+        if "safe_qwen_active_recovery" in self.store.state:
+            raise Stop("HUMAN_ACTION_REQUIRED", "SAFEQWEN_ACTIVE_REVIEW_REQUIRED",
+                       "ACTIVE Attempt 1 cannot be adopted, verified, repaired or replayed")
+        if "safe_qwen_recovery_identity" in self.store.state:
+            raise Stop("HUMAN_ACTION_REQUIRED", "SAFEQWEN_RECOVERY_IDENTITY_ONLY",
+                       "Recovery identity reserves future invocations; execution is not authorized")
+        if getattr(self.store, "_repair_write_failed", False):
+            raise Stop("HUMAN_ACTION_REQUIRED", "REPAIR_RECOVERY_REPLAY_REFUSED", "Uncertain recovery WAL; no launch allowed")
+        if (self.reconciliation_stop is not None and self.reconciliation_stop.reason in
+                {"REPAIR_RECOVERY_REVIEW_REQUIRED", "REPAIR_RECOVERY_REPLAY_REFUSED"}):
+            raise self.reconciliation_stop
+        if "repair_authorizations" in self.store.state:
+            raise Stop("HUMAN_ACTION_REQUIRED", "REPAIR_AUTHORIZATION_DORMANT",
+                       "Persisted repair authorization requires review; consumption and dispatch are disabled")
+        if "repair_recovery" in self.store.state:
+            if self._repair_controller is None:
+                raise Stop("HUMAN_ACTION_REQUIRED", "REPAIR_RECOVERY_REPLAY_REFUSED",
+                           "Active recovery session cannot be reconstructed or replayed")
+            self.store._require_repair_controller(self._repair_controller)
+            return
+        if (self.reconciliation_stop is not None and self.reconciliation_stop.reason in
+                {"INVOCATION_REVIEW_REQUIRED", "INVOCATION_REPLAY_REFUSED"}):
+            raise self.reconciliation_stop
+        units = self.store.state.get("work_units", {}).get("units", {})
+        if any("policy_b_shadow" in att for unit in units.values() for att in unit.get("attempts", [])):
+            raise Stop("HUMAN_ACTION_REQUIRED", "INVOCATION_REPLAY_REFUSED",
+                       "Shadow evidence cannot authorize automatic execution or verification replay")
+        for child in self.store.state.get("supervision", {}).get("children", {}).values():
+            inv = child.get("invocation")
+            if inv is not None:
+                unit = units.get(inv["unit_id"], {})
+                if inv["phase"] != "COMPLETE" or unit.get("current_attempt") == inv["attempt_id"]:
+                    raise Stop("HUMAN_ACTION_REQUIRED", "INVOCATION_REPLAY_REFUSED",
+                               "Recorded invocation cannot authorize automatic verifier or executor relaunch")
 
     def _run_guarded_verification(
         self,
@@ -606,6 +1274,9 @@ class WorkUnitScheduler:
         - Pre/post snapshot consistency (candidate contamination handling)
         - Atomic sealed evidence recording
         """
+        if self._observation_context() is not None:
+            return self._run_policy_b_shadow_verification(unit, section, attempt_id, attempt_elapsed_so_far)
+        self._refuse_invocation_replay()
         uid = unit["unit_id"]
         frozen_spec = {k: copy.deepcopy(unit["spec"][k]) for k in FROZEN_KEYS if k in unit["spec"]}
 
@@ -794,6 +1465,7 @@ class WorkUnitScheduler:
 
     def reconcile_on_resume(self):
         """Reconcile uncompleted attempts or crash states upon initialization (Fix B, C, D, G)."""
+        self._refuse_invocation_replay()
         if "work_units" not in self.store.state:
             return
         section = self.get_section()
@@ -1093,6 +1765,7 @@ class WorkUnitScheduler:
         Fix 6: Order ready units according to explicit persisted sequence.
         Fix E: Validate sequence integrity.
         """
+        self._refuse_invocation_replay()
         validate_sequence_integrity(section)
 
         # Fix 8: Any terminal unit failure stops all scheduling
@@ -1161,7 +1834,11 @@ class WorkUnitScheduler:
         """Execute a single attempt for a unit with immutable contract, unconditional scope check,
         cumulative shared budget accounting, and mandatory supervision boundaries.
         """
+        self._refuse_invocation_replay()
         uid = unit["unit_id"]
+        if self._repair_controller is not None:
+            if attempt_num != 1 or uid != self._repair_controller.mode["unit_id"] or unit["attempts"]:
+                raise WorkUnitSchedulingError("Active recovery permits only its unattempted Attempt 1")
 
         # Fix 1: Freeze controller-owned contract
         frozen_spec = {k: copy.deepcopy(unit["spec"][k]) for k in FROZEN_KEYS if k in unit["spec"]}
@@ -1226,7 +1903,7 @@ class WorkUnitScheduler:
             "repair_evidence": copy.deepcopy(repair_evidence),
         }
 
-        before = snapshot(self.repo)
+        before = self._shadow_snapshot() if self._observation_context() is not None else snapshot(self.repo)
         fs_before = capture_fs_snapshot(self.repo.root)
 
         # Set scoped repository confinement if applicable
@@ -1252,6 +1929,21 @@ class WorkUnitScheduler:
         attempt_record["started_at_clock"] = self.clock()
         attempt_record["started_at_runtime"] = round(self.runtime(), 3)
         attempt_record["stage_timeout"] = round(stage_timeout, 3)
+        observation_context = self._observation_context()
+        if observation_context is not None:
+            # Same first-attempt WAL transaction as the actual pre-executor capture.
+            # Recovery must refuse even a crash before the first native intent.
+            attempt_record[self._observation_key()] = {
+                "policy": "B", "mode": "ACTIVE" if self._repair_controller is not None else "SHADOW",
+                "phase": "STARTED", "observations": {},
+                "registry_sha256": durable.digest(observation_context["registry"]),
+            }
+            attempt_record["started_at_clock"] = observation_context["started_clock"]
+            stage_timeout = min(stage_timeout, self.remaining_unit_budget(
+                unit, self.clock() - attempt_record["started_at_clock"], attempt_id))
+            if stage_timeout <= 0:
+                raise Stop("BUDGET_EXHAUSTED", "unit_timeout", "Shadow budget exhausted before executor")
+            attempt_record["stage_timeout"] = stage_timeout
         self._persist_unit(section, unit)
 
         executor_error = None
@@ -1339,7 +2031,10 @@ class WorkUnitScheduler:
         # Corrupt .git/index must deterministically fail as scope_violation, NOT raise DurableError.
         if not is_scope_violation and executor_error is None:
             try:
-                after = snapshot(self.repo)
+                after = self._shadow_snapshot() if self._observation_context() is not None else snapshot(self.repo)
+                if self._observation_context() is not None:
+                    attempt_record[self._observation_key()]["candidate_snapshot"] = copy.deepcopy(after)
+                    attempt_record[self._observation_key()]["candidate_fs_snapshot"] = self._shadow_fs_snapshot()
                 git_changed = changed_paths(before, after)
                 changed = sorted(set(git_changed) | set(fs_changed))
                 if frozen_spec["mode"] == "read_only":
@@ -1556,7 +2251,10 @@ class WorkUnitScheduler:
         - MILESTONE_FAILED on failure.
         """
         if self.reconciliation_stop is not None:
-            self._persist_runtime()
+            if self.reconciliation_stop.reason not in {"INVOCATION_REPLAY_REFUSED", "INVOCATION_REVIEW_REQUIRED",
+                                                       "REPAIR_AUTHORIZATION_DORMANT", "REPAIR_RECOVERY_REPLAY_REFUSED",
+                                                       "REPAIR_RECOVERY_REVIEW_REQUIRED"}:
+                self._persist_runtime()
             return {
                 "status": self.reconciliation_stop.status,
                 "reason": self.reconciliation_stop.reason,

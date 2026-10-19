@@ -103,6 +103,9 @@ class Supervisor:
 
     def _record_failure(self, exc):
         if exc is not None:
+            owner = getattr(self.store, "_safe_qwen_active_controller", None)
+            if owner is not None and owner.scheduler.supervisor is self:
+                owner.persistence_failed()
             if not any(f is exc for f in self.failures):
                 self.failures.append(exc)
             if self.failure is None:
@@ -120,7 +123,7 @@ class Supervisor:
                 transition["detail"] = detail
             self.store.commit(supervision=value, supervision_event=transition)
 
-    def register(self, purpose, executable, command, containment="job"):
+    def register(self, purpose, executable, command, containment="job", *, invocation=None):
         token = uuid.uuid4().hex
         child = dict(run_id=self.store.state["run_id"], child_id=f"{purpose}-{token[:12]}",
                      purpose=purpose, pid=None, controller_pid=os.getpid(),
@@ -128,21 +131,30 @@ class Supervisor:
                      identity=None, started_at=self.clock(), token=token, state="STARTING",
                      boot=self.boot(), last_heartbeat=None, exit_code=None, termination=None,
                      containment=containment, job="Local\\harness-" + token, reason="launch_intent")
-        self.change("process_registered", child)
+        if invocation is not None:
+            if not isinstance(invocation, _VerifierInvocation) or invocation.supervisor is not self:
+                raise ValueError("Invocation registration requires controller-owned context")
+            child["invocation"] = copy.deepcopy(invocation.intent)
+        self.change("invocation_intent" if invocation is not None else "process_registered", child)
         return child["child_id"]
 
     def child(self, child_id):
         return copy.deepcopy(self.store.state["supervision"]["children"][child_id])
 
-    def started(self, child_id, pid):
+    def started(self, child_id, pid, *, native=None):
         child = self.child(child_id)
         actual = self.inspect(pid)
         if actual is None:
             raise RuntimeError("Child exited before ownership could be established")
         if os.path.normcase(actual["executable"]) != os.path.normcase(child["executable"]):
             raise RuntimeError("Child executable differs from registered executable")
+        if "invocation" in child:
+            if not isinstance(native, winprocess.ControllerVerifier) or native.pid != pid or actual != native.identity:
+                raise RuntimeError("Invocation requires retained native identity")
+            native.verify(actual)
+            child["invocation"]["phase"] = "BOUND"
         child.update(pid=pid, identity=actual, state="RUNNING", last_heartbeat=self.clock(), reason="identity_verified")
-        self.change("process_started", child)
+        self.change("invocation_bound" if "invocation" in child else "process_started", child)
 
     def exited(self, child_id, code, termination="natural"):
         child = self.child(child_id)
@@ -463,9 +475,463 @@ def controller_status(controller, boot, clock=time.time):
             "boot_session": "changed" if changed else "same"}
 
 
+def validate_invocations(state, previous=None, transition=None):
+    from durable import DurableError
+    try:
+        _validate_invocations(state, previous, transition)
+    except (KeyError, ValueError, TypeError, IndexError, AttributeError) as exc:
+        raise DurableError("Invalid verifier invocation; continuation refused") from exc
+
+
+def _validate_invocations(state, previous=None, transition=None):
+    """Validate the opt-in extension using existing child, plan and WAL records.
+
+    A child token is the unique invocation ID. Process identity is stored ONLY
+    in the existing Supervisor fields. This is consistency checking, not a new
+    authority token or an authentication boundary against same-user tampering.
+    """
+    import math
+    from durable import DurableError, digest
+    children = state.get("supervision", {}).get("children", {})
+    prior = (previous or {}).get("supervision", {}).get("children", {})
+    seen = set()
+    lifecycle_changes = 0
+    phases = {"INTENT", "BOUND", "RELEASED", "COMPLETE"}
+    events = {"INTENT": "invocation_intent", "BOUND": "invocation_bound",
+              "RELEASED": "invocation_release", "COMPLETE": "invocation_complete"}
+    def require(ok):
+        if not ok:
+            raise DurableError("Invalid or replayed verifier invocation; continuation refused")
+    for cid, child in children.items():
+        inv = child.get("invocation")
+        if inv is None:
+            require("invocation" not in child)
+            continue
+        require(type(inv) is dict and set(inv) == {
+            "phase", "unit_id", "attempt_id", "verifier_id", "registry_sha256",
+            "spec_sha256", "intended_argv", "resolved_argv", "candidate_fingerprint", "deadline"})
+        require(child["purpose"] == "verification_command" and child["containment"] == "job")
+        require(all(other["job"] != child["job"] for key, other in children.items() if key != cid))
+        require(type(inv["phase"]) is str and inv["phase"] in phases)
+        require(all(type(inv[k]) is str and inv[k] for k in ("unit_id", "attempt_id", "verifier_id")))
+        require(all(type(inv[k]) is str and re.fullmatch(r"[0-9a-f]{64}", inv[k])
+                    for k in ("registry_sha256", "spec_sha256", "candidate_fingerprint")))
+        require(type(inv["deadline"]) in (int, float) and math.isfinite(inv["deadline"]) and inv["deadline"] > 0)
+        registry = state["options"].get("verifier_registry")
+        require(type(registry) is dict and digest(registry) == inv["registry_sha256"])
+        unit = state.get("work_units", {}).get("units", {}).get(inv["unit_id"])
+        require(type(unit) is dict and digest(unit["spec"]) == inv["spec_sha256"])
+        require(inv["verifier_id"] in unit["spec"]["verifier_ids"])
+        defn = registry.get(inv["verifier_id"])
+        require(type(defn) is dict and inv["intended_argv"] == defn.get("argv"))
+        for key in ("intended_argv", "resolved_argv"):
+            require(type(inv[key]) is list and bool(inv[key]) and
+                    all(type(arg) is str and arg and "\0" not in arg for arg in inv[key]))
+        require(Path(inv["resolved_argv"][0]).is_absolute())
+        require(inv["intended_argv"][1:] == inv["resolved_argv"][1:])
+        require(checksum(inv["resolved_argv"]) == child["command_sha256"])
+        require(os.path.normcase(str(Path(inv["resolved_argv"][0]).resolve())) ==
+                os.path.normcase(child["executable"]))
+        attempts = unit["attempts"]
+        matching = [a for a in attempts if a["attempt_id"] == inv["attempt_id"]]
+        require(len(matching) == 1)
+        attempt = matching[0]
+        second = attempt is not attempts[0]
+        if len(attempts) != 1:
+            # Attempt 1 must remain immutable and COMPLETE beside Attempt 2.
+            # Second invocations require the separately selected qualification
+            # lifecycle; every earlier operation keeps its original restriction.
+            from durable import validate_repair_authorizations, _validate_repair_allocation
+            validate_repair_authorizations(state)
+            active = state.get("safe_qwen_active_recovery", {})
+            ai = active.get("schema_version") in (5, 6, 7)
+            if ai:
+                from safe_qwen_active_grant import allocation_mode
+                mode = allocation_mode(state)
+                # Only immutable, already COMPLETE Attempt 1 invocations may
+                # coexist with this allocated AI Attempt 2. No verifier launch.
+                require((not second and inv["phase"] == "COMPLETE") or (second and active["schema_version"] == 7))
+            else:
+                mode = state["repair_recovery"]
+            _validate_repair_allocation(state, state["repair_authorizations"]["repair-" + mode["recovery_id"]])
+            require(len(attempts) == 2)
+            if second:
+                if ai:
+                    v = active["second_verification"]
+                    require(v is not None and v["binding"]["attempt_id"] == inv["attempt_id"]
+                            and active["identity"]["unit_id"] == inv["unit_id"]
+                            and v["before"]["fingerprint"] == inv["candidate_fingerprint"])
+                    require(inv["deadline"] <= active["identity"]["deadline"])
+                else:
+                    v = state.get("repair_verification", {})
+                    require(mode.get("operation") == "OFFLINE_VERIFY" and v.get("attempt_id") == inv["attempt_id"]
+                            and v.get("unit_id") == inv["unit_id"] and v.get("candidate_fingerprint") == inv["candidate_fingerprint"])
+                grant = state["repair_authorizations"]["repair-" + mode["recovery_id"]]
+                require(inv["deadline"] <= min(mode["task_deadline"], grant["budget"]["unit_deadline"]))
+                if inv["phase"] != "COMPLETE":
+                    require(v["phase"] == "OBSERVING")
+            else:
+                require(inv["phase"] == "COMPLETE")
+        else:
+            require(not second)
+        if inv["phase"] != "COMPLETE":
+            require(unit["status"] == "VERIFYING" and unit["current_attempt"] == inv["attempt_id"]
+                    and attempt["completed_at"] is None)
+        key = (inv["unit_id"], inv["attempt_id"], inv["verifier_id"])
+        require(key not in seen)
+        seen.add(key)
+        if inv["phase"] == "INTENT":
+            require(child["pid"] is None and child["identity"] is None)
+        else:
+            require(child["pid"] is not None and child["identity"] is not None)
+        if inv["phase"] == "COMPLETE":
+            require(child["state"] == "EXITED" and type(child["exit_code"]) is int
+                    and child["termination"] in {"natural", "forced"})
+        if previous is not None:
+            old = prior.get(cid)
+            old_inv = old.get("invocation") if old else None
+            if old_inv is None:
+                require(old is None and inv["phase"] == "INTENT" and child["state"] == "STARTING")
+                if second:
+                    observations = v["observations"] if ai else attempt["repair_observation"]["observations"]
+                    order = unit["spec"]["verifier_ids"]
+                    require(len(observations) < len(order) and inv["verifier_id"] == order[len(observations)])
+                    require(inv["deadline"] > v["checked_clock"])
+            else:
+                require({k: v for k, v in inv.items() if k != "phase"} ==
+                        {k: v for k, v in old_inv.items() if k != "phase"})
+                before, after = old_inv["phase"], inv["phase"]
+                require(before == after or (before, after) in {
+                    ("INTENT", "BOUND"), ("BOUND", "RELEASED"), ("RELEASED", "COMPLETE")})
+                for k in ("token", "job", "boot", "controller_pid", "executable", "command_sha256"):
+                    require(child[k] == old[k])
+                if before != "INTENT":
+                    require(child["pid"] == old["pid"] and child["identity"] == old["identity"])
+                if before == "COMPLETE":
+                    require(child == old)
+            if old_inv is None or old_inv["phase"] != inv["phase"]:
+                lifecycle_changes += 1
+                require(transition == {"event": events[inv["phase"]], "child_id": cid})
+    for cid, child in prior.items():
+        if "invocation" in child:
+            require(cid in children and "invocation" in children[cid])
+    if transition and transition.get("event") in events.values():
+        require(lifecycle_changes == 1)
+
+
+def _validated_store(store):
+    """Read existing WAL authority; never treat matching caller dictionaries as proof."""
+    from durable import Store, DurableError, encoded
+    if not isinstance(store, Store):
+        raise DurableError("Invocation requires a genuine durable Store")
+    loaded = Store(store.directory.parent, store.directory.name)
+    loaded.load()
+    if (loaded.tail or encoded(loaded.state) != encoded(store.state)
+            or encoded(loaded.records) != encoded(store.records)):
+        raise DurableError("Invocation WAL/state mismatch or incomplete WAL tail")
+
+
+class _VerifierInvocation:
+    """Ephemeral controller context; cannot be reconstructed from JSON for resume."""
+    def __init__(self, scheduler, unit_id, attempt_id, verifier_id, *, _repair_controller=None, _active_controller=None):
+        import math
+        import shutil
+        from durable import DurableError, digest, snapshot
+        from harness import safe_command
+        self.scheduler, self.supervisor = scheduler, scheduler.supervisor
+        self.store, self.repo, self.clock = scheduler.store, scheduler.repo, scheduler.clock
+        self.child_id = None
+        self.repair_controller = _repair_controller
+        self.active_controller = _active_controller
+        if _active_controller is not None:
+            from safe_qwen_active_recovery import _Controller
+            if (type(_active_controller) is not _Controller or _repair_controller is not None
+                    or getattr(self.store, "_safe_qwen_active_controller", None) is not _active_controller
+                    or _active_controller.scheduler is not scheduler or not _active_controller.verify_selected):
+                raise DurableError("Native verification requires registered ACTIVE v3 controller")
+        if not isinstance(self.supervisor, Supervisor) or self.supervisor.store is not self.store:
+            raise DurableError("Invocation requires this run's Supervisor")
+        with self.store.mutex:
+            _validated_store(self.store)
+            if (str(self.repo.root) != self.store.state["target_repository"] or
+                    self.store.directory.is_relative_to(Path(self.repo.root).resolve())):
+                raise DurableError("Invocation repository/Store binding mismatch")
+            if _active_controller is not None:
+                from safe_qwen_active_verification import guard
+                guard(_active_controller)
+            elif _repair_controller is None:
+                scheduler.guard_supervision()
+            else:
+                scheduler._guard_repair_verification(_repair_controller)
+            if scheduler.reconciliation_stop is not None:
+                raise DurableError("Invocation blocked by recovery reconciliation")
+            section = scheduler.get_section()
+            unit = section["units"].get(unit_id)
+            active_second = _active_controller is not None and _active_controller.second_verification_started
+            second = _repair_controller is not None or active_second
+            index = 1 if second else 0
+            if (not unit or unit["status"] != "VERIFYING" or unit["current_attempt"] != attempt_id
+                    or len(unit["attempts"]) != (2 if second else 1) or unit["attempts"][index]["attempt_id"] != attempt_id
+                    or unit["attempts"][index]["completed_at"] is not None
+                    or (_repair_controller is not None and (_repair_controller.verification_context["unit_id"] != unit_id
+                                    or _repair_controller.verification_context["attempt_id"] != attempt_id))
+                    or (active_second and _active_controller.data["second_verification"] is None)
+                    or verifier_id not in unit["spec"]["verifier_ids"]):
+                raise DurableError("Invocation requires the active first attempt and registered verifier")
+            self.registry = copy.deepcopy(self.store.state["options"].get("verifier_registry"))
+            if type(self.registry) is not dict or self.registry != scheduler.verifier_registry:
+                raise DurableError("Invocation requires the approved WAL registry")
+            definition = self.registry.get(verifier_id)
+            if not definition or not safe_command(definition.get("argv")):
+                raise DurableError("Invocation command is not approved")
+            intended = copy.deepcopy(definition["argv"])
+            executable = shutil.which(intended[0])
+            if not executable:
+                raise DurableError("Invocation executable unavailable")
+            resolved = [str(Path(executable).resolve()), *intended[1:]]
+            manager = self.store.state.get("manager", {})
+            if scheduler.budgets != manager.get("budgets"):
+                raise DurableError("Invocation budgets differ from WAL")
+            timing = unit["attempts"][index].get("stage_timing")
+            if (not timing or timing.get("stage") != "VERIFYING" or timing.get("unit_id") != unit_id
+                    or timing.get("attempt_id") != attempt_id):
+                raise DurableError("Invocation lacks durable verification timing")
+            now = self.clock()
+            self.start_clock = now
+            start = timing.get("stage_start_clock")
+            elapsed = timing.get("attempt_elapsed_at_start")
+            if any(type(n) not in (int, float) or not math.isfinite(n) or n < 0 for n in (now, start, elapsed)) or now < start:
+                raise DurableError("Invocation timing is ambiguous")
+            remaining = scheduler.remaining_unit_budget(unit, elapsed + now - start, attempt_id)
+            limits = [remaining, scheduler.remaining_task_budget(now), definition.get("timeout_seconds", 30.0)]
+            if _active_controller is not None:
+                limits.extend([_active_controller.identity[k] - now for k in ("task_deadline", "unit_deadline", "deadline")])
+            if _repair_controller is not None:
+                grant = self.store.state["repair_authorizations"]["repair-" + _repair_controller.mode["recovery_id"]]
+                limits.extend([_repair_controller.mode["task_deadline"] - now, grant["budget"]["unit_deadline"] - now])
+            if any(type(n) not in (int, float) or not math.isfinite(n) or n <= 0 for n in limits):
+                raise DurableError("Invocation cumulative budget exhausted or invalid")
+            for child in self.store.state["supervision"]["children"].values():
+                inv = child.get("invocation")
+                if inv and ((inv["unit_id"], inv["attempt_id"], inv["verifier_id"]) ==
+                            (unit_id, attempt_id, verifier_id) or inv["phase"] != "COMPLETE"):
+                    raise DurableError("Duplicate or uncertain invocation; relaunch refused")
+            self.intent = dict(phase="INTENT", unit_id=unit_id, attempt_id=attempt_id,
+                               verifier_id=verifier_id, registry_sha256=digest(self.registry),
+                               spec_sha256=digest(unit["spec"]), intended_argv=intended,
+                               resolved_argv=resolved, candidate_fingerprint=snapshot(self.repo)["fingerprint"],
+                               deadline=now + min(limits))
+            self.child_id = self.supervisor.register("verification_command", resolved[0], resolved, invocation=self)
+
+    def resume(self, native):
+        import math
+        from durable import DurableError, snapshot
+        def check_deadline():
+            now = self.clock()
+            if (type(now) not in (int, float) or not math.isfinite(now)
+                    or now < self.start_clock or now >= self.intent["deadline"]):
+                raise DurableError("Invocation clock/deadline ambiguous or exhausted")
+        with self.store.mutex:
+            _validated_store(self.store)
+            if self.active_controller is not None:
+                from safe_qwen_active_verification import guard
+                guard(self.active_controller, self.child_id)
+            if self.repair_controller is not None:
+                self.scheduler._guard_repair_verification(self.repair_controller, self.child_id)
+            check_deadline()
+            child = self.supervisor.child(self.child_id)
+            if (child["invocation"]["phase"] != "BOUND" or child["state"] != "RUNNING"
+                    or child["boot"] != self.supervisor.boot()
+                    or snapshot(self.repo)["fingerprint"] != self.intent["candidate_fingerprint"]):
+                raise DurableError("Invocation stale or unbound; resume refused")
+            native.verify(child["identity"])
+            child["invocation"]["phase"] = "RELEASED"
+            self.supervisor.change("invocation_release", child)
+            # WAL/cache failure above leaves the process suspended. Never retry
+            # resume after an uncertain commit or a controller interruption.
+            check_deadline()
+            if self.active_controller is not None:
+                guard(self.active_controller, self.child_id)
+                check_deadline()
+            if self.repair_controller is not None:
+                self.scheduler._guard_repair_verification(self.repair_controller, self.child_id)
+                check_deadline()
+            native.resume(child["identity"])
+
+    def complete(self):
+        with self.store.mutex:
+            child = self.supervisor.child(self.child_id)
+            child["invocation"]["phase"] = "COMPLETE"
+            self.supervisor.change("invocation_complete", child)
+
+
+class VerifierEvidenceError(RuntimeError):
+    """Observation failed closed; attached facts never authorize continuation."""
+    def __init__(self, message, evidence):
+        super().__init__(message)
+        self.evidence = copy.deepcopy(evidence)
+
+
+def _run_observed_verifier(supervisor, command, intended_argv, cwd, timeout, maximum,
+                           progress=None, cancel_event=None, invocation=None):
+    """Opt-in direct native lifecycle observation. No worker JSON is consumed.
+
+    The controller creates a suspended verifier and its own kill-on-close Job.
+    There is no broker in this topology. Returned facts are not retry approval;
+    without the optional controller invocation, these facts remain unbound.
+    "natural" means signaled without controller termination, not proof against
+    external same-user termination or evidence that test assertions are honest.
+    """
+    import math
+    import shutil
+    import tempfile
+    from contextlib import nullcontext
+    if os.name != "nt":
+        raise ValueError("Native verifier observation requires Windows")
+    for name, argv in (("command", command), ("intended_argv", intended_argv)):
+        if (not isinstance(argv, list) or not argv or
+                any(not isinstance(a, str) or not a or "\0" in a for a in argv)):
+            raise ValueError(f"{name} must be an explicit nonempty argv list")
+    command, intended_argv = list(command), list(intended_argv)
+    if not Path(command[0]).is_absolute() or command[1:] != intended_argv[1:]:
+        raise ValueError("Resolved command requires an absolute executable and identical arguments")
+    intended_executable = (intended_argv[0] if Path(intended_argv[0]).is_absolute()
+                           else shutil.which(intended_argv[0]))
+    if (not intended_executable or os.path.normcase(str(Path(intended_executable).resolve())) !=
+            os.path.normcase(str(Path(command[0]).resolve()))):
+        raise ValueError("Intended and resolved verifier executables disagree")
+    if type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError("Verifier timeout must be finite and positive")
+    if type(maximum) is not int or maximum <= 0:
+        raise ValueError("Verifier output bound must be a positive integer")
+    child_id = (invocation.child_id if invocation is not None else
+                supervisor.register("verification_command", command[0], command))
+    child = supervisor.child(child_id)
+    evidence = dict(schema_version=1, source="controller_native_handles", child_id=child_id,
+                    broker=None, verifier=None, intended_argv=intended_argv,
+                    intended_command_sha256=checksum(intended_argv), resolved_argv=command,
+                    resolved_command_sha256=checksum(command), job=child["job"],
+                    termination="launch_failed", observed_exit_code=None, cleanup="not_observed",
+                    execution_started=False)
+    start = time.monotonic()
+    native = None
+    with open(os.devnull, "rb") as inp, tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+        try:
+            try:
+                second = invocation is not None and invocation.repair_controller is not None
+                active = invocation.active_controller if invocation is not None else None
+                with supervisor.store.mutex if second or active is not None else nullcontext():
+                    if active is not None:
+                        from safe_qwen_active_verification import guard
+                        guard(active, child_id)
+                        if (supervisor.child(child_id)["invocation"]["phase"] != "INTENT"
+                                or time.monotonic() >= invocation.intent["deadline"]):
+                            raise RuntimeError("ACTIVE verifier launch authority expired")
+                    if second:
+                        invocation.scheduler._guard_repair_verification(invocation.repair_controller, child_id)
+                        if (supervisor.child(child_id)["invocation"]["phase"] != "INTENT"
+                                or time.monotonic() >= invocation.intent["deadline"]):
+                            raise RuntimeError("Qualification launch authority expired")
+                    native = winprocess.ControllerVerifier(child["job"])
+                    native.launch(command, cwd, (inp, out, err))
+            except OSError:
+                if native is None or native.pid is not None:
+                    raise  # Containment/identity failure is not a mere launch failure.
+            else:
+                evidence["verifier"] = dict(pid=native.pid, identity=copy.deepcopy(native.identity))
+                if invocation is None:
+                    supervisor.started(child_id, native.pid)
+                else:
+                    supervisor.started(child_id, native.pid, native=native)
+                if supervisor.child(child_id)["identity"] != native.identity:
+                    raise RuntimeError("Supervisor and retained verifier identity disagree")
+                evidence["termination"] = "natural"
+                evidence["termination_basis"] = "signaled_without_controller_termination"
+                deadline = (start + timeout if invocation is None else
+                            min(start + timeout, invocation.intent["deadline"]))
+                context = (progress.operation("COMMAND", "native verifier observation", timeout)
+                           if progress is not None else nullcontext())
+                with context:
+                    while True:
+                        code = native.wait(0)
+                        if code is not None:
+                            evidence["observed_exit_code"] = code
+                            if time.monotonic() >= deadline:
+                                evidence.update(termination="timeout", termination_basis="controller_deadline")
+                            break
+                        if cancel_event is not None and cancel_event.is_set():
+                            evidence.update(termination="forced", termination_basis="controller_cancel")
+                            break
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            evidence.update(termination="timeout", termination_basis="controller_deadline")
+                            break
+                        if not evidence["execution_started"]:
+                            if invocation is None:
+                                native.resume(native.identity)
+                            else:
+                                invocation.resume(native)
+                            evidence["execution_started"] = True
+                            continue
+                        code = native.wait(min(0.05, remaining))
+                        if code is not None:
+                            evidence["observed_exit_code"] = code
+                            if time.monotonic() >= deadline:
+                                evidence.update(termination="timeout", termination_basis="controller_deadline")
+                            break
+            # Kill lingering descendants even when the verifier root exited naturally.
+            native.terminate_job()
+            native.drain()
+            evidence["cleanup"] = "observed_empty"
+            if native.process is not None and evidence["observed_exit_code"] is None:
+                evidence["observed_exit_code"] = native.wait(10)
+                if evidence["observed_exit_code"] is None:
+                    raise RuntimeError("Drained job without signaled verifier handle")
+            supervisor.exited(child_id, evidence["observed_exit_code"],
+                              "forced" if evidence["termination"] in {"timeout", "forced"}
+                              else evidence["termination"])
+        except BaseException as exc:
+            evidence["termination"] = "observation_failed"
+            evidence["cleanup"] = "incomplete"
+            try:
+                if native is not None:
+                    native.terminate_job()
+                    native.drain()
+                    evidence["cleanup"] = "observed_empty"
+                    if native.process is not None:
+                        evidence["observed_exit_code"] = native.wait(10)
+            except BaseException as cleanup_exc:
+                evidence["cleanup_error"] = type(cleanup_exc).__name__
+            # No EXITED claim or success return after contradictory/missing observation.
+            raise VerifierEvidenceError("Native verifier observation failed closed", evidence) from exc
+        finally:
+            if native is not None:
+                native.close()
+        outputs, sizes = [], []
+        for stream in (out, err):
+            stream.seek(0, 2)
+            sizes.append(stream.tell())
+            stream.seek(max(0, stream.tell() - maximum * 4))
+            outputs.append(stream.read().decode("utf-8", errors="replace")[-maximum:])
+    if invocation is not None:
+        invocation.complete()
+    return dict(exit_code=evidence["observed_exit_code"] if evidence["termination"] == "natural" else None,
+                termination=evidence["termination"], stdout=outputs[0], stderr=outputs[1],
+                output_truncated=any(size > maximum for size in sizes),
+                duration_seconds=round(time.monotonic() - start, 2), controller_evidence=evidence)
+
+
 def run_command(supervisor, command, cwd, timeout, maximum, *, progress=None,
-                purpose="verification_command", env=None, stdin=None, opencode=False):
+                purpose="verification_command", env=None, stdin=None, opencode=False,
+                observe_verifier=False, intended_argv=None, cancel_event=None):
     """Gate actual work on a flushed identity record; the broker owns its job."""
+    if observe_verifier is not False:
+        if observe_verifier is not True or purpose != "verification_command" or opencode or env is not None or stdin is not None:
+            raise ValueError("Native observation is an explicit verifier-only opt-in")
+        return _run_observed_verifier(supervisor, command, intended_argv, cwd, timeout, maximum,
+                                     progress, cancel_event)
+    if intended_argv is not None or cancel_event is not None:
+        raise ValueError("Native verifier options require observe_verifier=True")
     from durable import atomic_write, encoded
     from contextlib import nullcontext
     def observe(label, operation, budget, alive=None):

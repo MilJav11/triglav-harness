@@ -207,6 +207,14 @@ class SafeQwenWorker:
     def set_deadline(self, deadline):
         self.deadline = deadline
 
+    def _tool_session(self, policy):
+        """Internal seam for the fixed supervised worker's remote tool session.
+
+        The ordinary worker retains its original local policy/audit behavior.
+        No session class or import name is accepted from model or caller data.
+        """
+        return ToolSession(policy, audit=self.audit, max_actions=self.max_actions)
+
     def execute(self, unit_spec, context, repo):
         if Path(repo.root).resolve(strict=True) != self.policy.root:
             raise Denied("REPOSITORY_MISMATCH")
@@ -221,7 +229,7 @@ class SafeQwenWorker:
         policy = self.policy
         if mode == "read_only":
             policy = Policy(policy.root, policy.readable, (), policy.frozen, policy.required)
-        session = ToolSession(policy, audit=self.audit, max_actions=self.max_actions)
+        session = self._tool_session(policy)
         started = self.clock()
         limit = unit_spec["limits"]["timeout_seconds"]
         deadline = min(self.deadline, started + limit) if self.deadline is not None else started + limit

@@ -15,6 +15,26 @@ from tool_protocol import Denied
 from safe_qwen_worker import ToolSession
 from urllib.parse import urlsplit
 
+def operation_payload(model, messages, operation_schema):
+    """Canonical existing SafeQwen wire request; no executable tool schema."""
+    return {"model": model, "messages": messages,
+            "max_tokens": 4096, "temperature": 0, "seed": 42, "stream": False,
+            "response_format": {"type": "json_schema", "json_schema": {
+                "name": "safe_qwen_operation", "strict": True, "schema": operation_schema}}}
+
+
+def operation_content(wire):
+    """Return validated assistant text, or None for the existing refusal case."""
+    valid = type(wire) is dict and type(wire.get("choices")) is list and len(wire["choices"]) == 1
+    choice = wire["choices"][0] if valid else None
+    valid = valid and type(choice) is dict and choice.get("finish_reason") == "stop"
+    message = choice.get("message") if valid else None
+    valid = (valid and type(message) is dict and message.get("role") == "assistant"
+             and not message.get("tool_calls") and not message.get("function_call")
+             and not message.get("refusal") and type(message.get("content")) is str
+             and len(message["content"]) <= 70000)
+    return message["content"] if valid else None
+
 def error_diagnostic(exc, stage):
     # Reuse the controller's existing credential redactor; never persist prompts,
     # raw response bodies or reasoning. Fixed-size frames retain the failure site.
@@ -73,10 +93,7 @@ class SafeQwenExecutor:
                           "wire_valid": None, "trusted": False}
             try:
                 request_timeout = gw.bounded_timeout(min(remaining, self.config["request_timeout_seconds"]))
-                payload = {"model": gw.config["roles"]["code"], "messages": messages,
-                           "max_tokens": 4096, "temperature": 0, "seed": 42, "stream": False,
-                           "response_format": {"type": "json_schema", "json_schema": {
-                               "name": "safe_qwen_operation", "strict": True, "schema": operation_schema}}}
+                payload = operation_payload(gw.config["roles"]["code"], messages, operation_schema)
                 # No OpenAI 'tools' field or generic execution schema.
                 gw.log.emit("model_request_start", role="code", model=payload["model"],
                             phase="safe_qwen_worker", timeout_seconds=request_timeout)
@@ -84,19 +101,12 @@ class SafeQwenExecutor:
                 with gw.log.operation("REQUEST", "safe Qwen operation", request_timeout, role="code"):
                     wire = gw.request("POST", "/v1/chat/completions", payload, timeout=request_timeout)
                 request_stage = "response_validation"
-                valid = (type(wire) is dict and type(wire.get("choices")) is list
-                         and len(wire["choices"]) == 1)
-                choice = wire["choices"][0] if valid else None
-                valid = valid and type(choice) is dict and choice.get("finish_reason") == "stop"
-                message = choice.get("message") if valid else None
-                valid = (valid and type(message) is dict and message.get("role") == "assistant"
-                         and not message.get("tool_calls") and not message.get("function_call")
-                         and not message.get("refusal") and type(message.get("content")) is str
-                         and len(message["content"]) <= 70000)
+                content = operation_content(wire)
+                valid = content is not None
                 diagnostic.update(wire_valid=bool(valid), status="response_received" if valid else "malformed_response")
                 if valid:
-                    diagnostic["content_sha256"] = hashlib.sha256(message["content"].encode("utf-8")).hexdigest()
-                    diagnostic["content_chars"] = len(message["content"])
+                    diagnostic["content_sha256"] = hashlib.sha256(content.encode("utf-8")).hexdigest()
+                    diagnostic["content_chars"] = len(content)
                 request_stage = "ram_guard"
                 gw.check_active_ram()
                 request_stage = "telemetry"
@@ -106,7 +116,7 @@ class SafeQwenExecutor:
                 gw.log.emit("model_request", role="code", model=payload["model"],
                             phase="safe_qwen_worker", duration_seconds=diagnostic["duration_seconds"],
                             wire_valid=bool(valid), finish_reason="stop" if valid else None)
-                return message["content"] if valid else "{}"
+                return content if valid else "{}"
             except Exception as exc:
                 diagnostic.update(status="failed", duration_seconds=round(time.monotonic() - request_started, 3),
                                   failure=error_diagnostic(exc, request_stage))

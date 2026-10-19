@@ -6,12 +6,15 @@ import copy
 import ctypes
 import hashlib
 import json
+import math
 import os
 import re
 import stat
 import subprocess
+import sys
 import tempfile
 import threading
+import time
 import functools
 import shutil
 import uuid
@@ -26,6 +29,17 @@ import winprocess
 
 SCHEMA_VERSION = 1
 TERMINAL_ACCEPTANCE_SCHEMA_VERSION = 1
+REPAIR_AUTHORIZATION_SCHEMA_VERSION = 1
+# GRANTED v1 can become CONSUMED v2 only in the continuous allocation operation.
+# The atomic transaction only allocates. Mode v3 dispatch has a separate WAL lifecycle.
+# Issuance requires the explicit active controller operation, never JSON authority.
+_REPAIR_DECISION_EVENT = "repair_policy_b_decision"
+_REPAIR_GRANT_EVENT = "repair_authorization_granted"
+_REPAIR_CONSUME_EVENT = "repair_authorization_consumed"
+_INVOCATION_EVENTS = ("invocation_intent", "invocation_bound", "invocation_release",
+                      "process_exit", "invocation_complete")
+_SAFE_QWEN_IDENTITY = "safe_qwen_recovery_identity"
+_SAFE_QWEN_RESERVATION = "recovery/safe-qwen-identity.json"
 STATUSES = {"CREATED", "PLANNING", "EXECUTING", "VERIFYING", "REVIEWING",
             "CHECKPOINTING", "VERIFIED", "FAILED", "INTERRUPTED", "COMPLETED",
             # Bounded autonomous Manager runs only (see manager.py).
@@ -221,11 +235,1114 @@ def validate_state(state):
     if "work_units" in state:
         import work_units
         work_units.validate_section(state["work_units"])
+    from supervision import validate_invocations
+    validate_invocations(state)
     if "work_unit_planner" in state:
         import work_unit_planner
         work_unit_planner.validate_planning_section(state["work_unit_planner"], durable_state=state)
     if "terminal_acceptance" in state:
         validate_terminal_acceptance(state["terminal_acceptance"], state["run_id"])
+    validate_repair_authorizations(state)
+    validate_safe_qwen_recovery_identity(state)
+    from safe_qwen_active_recovery import validate as validate_active_first
+    validate_active_first(state)
+
+
+def validate_safe_qwen_recovery_identity(state):
+    """Closed identity-only v1; neither worker execution nor repair authority.
+
+    This slice deliberately keeps the parent READY and unattempted. Slots are
+    immutable reservations, not allocated attempts and not additional DAG units.
+    Replay checks historical pins, not current source files or live processes.
+    """
+    if _SAFE_QWEN_IDENTITY not in state:
+        return
+    try:
+        from terminal_run import recovery_worker_spec
+        from safe_executor_binding import digest as pin_digest
+        i = state[_SAFE_QWEN_IDENTITY]
+        _repair_fields(i, "schema_version kind identity_id run_id unit_id repository parent_spec_sha256 "
+                       "worker_spec_sha256 scope_sha256 registry_sha256 config_sha256 model_pin_sha256 "
+                       "environment_sha256 controller_session budgets_sha256 baseline_fingerprint "
+                       "started_clock task_deadline unit_deadline invocations")
+        _repair_require(type(i["schema_version"]) is int and i["schema_version"] == 1
+                        and type(i["kind"]) is str and i["kind"] == "SAFEQWEN_IDENTITY_ONLY"
+                        and type(i["identity_id"]) is str and re.fullmatch(r"[0-9a-f]{32}", i["identity_id"]))
+        _repair_require(not any(k in state for k in ("repair_recovery", "repair_authorizations", "repair_dispatch",
+                                                    "repair_verification", "terminal_acceptance")))
+        uid = i["unit_id"]
+        _repair_require(type(uid) is str and type(i["run_id"]) is str and i["run_id"] == state["run_id"]
+                        and type(i["repository"]) is str and i["repository"] == state["target_repository"]
+                        and state["work_units"]["sequence"] == [uid] and set(state["work_units"]["units"]) == {uid})
+        unit = state["work_units"]["units"][uid]
+        _repair_require(unit["status"] == "READY" and unit["attempts"] == []
+                        and unit["current_attempt"] is None and unit["result"] is None
+                        and state["last_verified_checkpoint"] is None and state["verified_progress"] == [])
+        cfg = state["options"]["config"]
+        pin = cfg["safe_qwen_identity"]
+        _repair_require(cfg.get("executor") == "safe_qwen" and type(pin) is dict
+                        and type(pin.get("version")) is int and pin["version"] == 2
+                        and pin["sha256"] == pin_digest({k: v for k, v in pin.items() if k != "sha256"})
+                        and pin["configuration_sha256"] == pin_digest({k: v for k, v in cfg.items() if k != "safe_qwen_identity"})
+                        and pin["scope"]["root"] == i["repository"]
+                        and state["options"]["work_unit_executor"] == {"kind": "safe_qwen", "identity_sha256": pin["sha256"]})
+        worker = recovery_worker_spec(unit["spec"], cfg)
+        for key, value in (("parent_spec_sha256", unit["spec"]), ("worker_spec_sha256", worker),
+                           ("scope_sha256", {"parent": unit["spec"]["scope"], "manager": state["manager"]["scope"],
+                                             "worker": pin["scope"]}),
+                           ("registry_sha256", state["options"]["verifier_registry"]), ("config_sha256", cfg),
+                           ("environment_sha256", state["environment"]), ("budgets_sha256", state["manager"]["budgets"])):
+            _repair_sha(i[key])
+            _repair_require(i[key] == digest(value))
+        _repair_sha(i["model_pin_sha256"])
+        _repair_require(i["model_pin_sha256"] == pin["sha256"])
+        _repair_require(encoded(i["controller_session"]) == encoded(_repair_session(state)))
+        _repair_sha(i["baseline_fingerprint"])
+        for key in ("started_clock", "task_deadline", "unit_deadline"):
+            _repair_require(type(i[key]) in (int, float) and math.isfinite(i[key]) and i[key] > 0)
+        _repair_require(i["task_deadline"] > i["started_clock"]
+                        and i["unit_deadline"] == i["started_clock"] + unit["spec"]["limits"]["timeout_seconds"]
+                        and i["task_deadline"] - i["started_clock"] <= state["manager"]["budgets"]["max_runtime_seconds"])
+        slots = i["invocations"]
+        _repair_require(type(slots) is list and len(slots) == 2)
+        for number, slot in enumerate(slots, 1):
+            _repair_fields(slot, "execution_id attempt_id attempt_number worker_spec worker_spec_sha256")
+            _repair_require(type(slot["attempt_number"]) is int and slot["attempt_number"] == number
+                            and type(slot["attempt_id"]) is str and slot["attempt_id"] == f"{uid}-attempt-{number}"
+                            and type(slot["execution_id"]) is str
+                            and slot["execution_id"] == digest([i["identity_id"], i["run_id"], uid, number, i["worker_spec_sha256"]])
+                            and encoded(slot["worker_spec"]) == encoded(worker)
+                            and type(slot["worker_spec_sha256"]) is str and slot["worker_spec_sha256"] == digest(worker))
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
+        raise DurableError("Invalid SafeQwen recovery identity") from exc
+
+
+def _validate_safe_qwen_identity_history(records, read_evidence, tail=b"", reservation_exists=False):
+    """A separately flushed reservation makes even a torn initial commit fatal."""
+    previous = {}
+    selected = None
+    for record in records:
+        _repair_require(type(record["event"]) is str and not record["event"].startswith("safe_qwen_recovery_"))
+        transition = record.get("transition")
+        _repair_require(not (type(transition) is dict and type(transition.get("event")) is str
+                             and transition["event"].startswith("safe_qwen_recovery_")))
+        marker = record.get(_SAFE_QWEN_IDENTITY)
+        _repair_require(record["event"] == "state_committed" or marker is None)
+        if record["event"] != "state_committed":
+            continue
+        state = record["state"]
+        identity = state.get(_SAFE_QWEN_IDENTITY)
+        if identity is not None:
+            validate_safe_qwen_recovery_identity(state)
+            if selected is None:
+                _repair_fields(record, "sequence time event previous sha256 state transition safe_qwen_recovery_identity")
+                _repair_require(marker == {"event": "identity_selected", "sha256": digest(identity)}
+                                and record["transition"] is None and previous)
+                ignored = {"revision", "updated_at", _SAFE_QWEN_IDENTITY}
+                _repair_require({k: v for k, v in previous.items() if k not in ignored} ==
+                                {k: v for k, v in state.items() if k not in ignored})
+                selected = identity
+                _repair_require(read_evidence({"path": _SAFE_QWEN_RESERVATION, "sha256": digest(identity)}) == identity)
+            else:
+                _repair_require(encoded(identity) == encoded(selected) and marker is None)
+                uid = identity["unit_id"]
+                _repair_require(state["work_units"]["units"][uid] == previous["work_units"]["units"][uid])
+        else:
+            _repair_require(selected is None and marker is None)
+        previous = state
+    _repair_require(not ((selected is not None or reservation_exists) and tail)
+                    and bool(selected) == bool(reservation_exists))
+
+
+def _repair_require(condition):
+    if not condition:
+        raise DurableError("Invalid, stale or replayed repair authorization; continuation refused")
+
+
+def _repair_fields(value, fields):
+    _repair_require(type(value) is dict and set(value) == set(fields.split()))
+
+
+def _repair_sha(value):
+    _repair_require(type(value) is str and re.fullmatch(r"[0-9a-f]{64}", value) is not None)
+
+
+def _repair_ref(value):
+    _repair_fields(value, "sequence sha256")
+    _repair_require(type(value["sequence"]) is int and value["sequence"] > 0)
+    _repair_sha(value["sha256"])
+
+
+def _repair_context(state, unit, attempt):
+    """Identity of the existing cumulative account and recovery controller."""
+    manager = state["manager"]
+    session = _repair_session(state)
+    timing = attempt["stage_timing"]
+    elapsed = attempt["timeout_info"]["elapsed_seconds"]
+    runtime = manager["runtime_seconds"]
+    timeout = unit["spec"]["limits"]["timeout_seconds"]
+    for value in (elapsed, runtime, timeout, timing["stage_start_clock"], timing["attempt_elapsed_at_start"]):
+        _repair_require(type(value) in (int, float) and math.isfinite(value) and value >= 0)
+    _repair_require(elapsed < timeout and runtime < manager["budgets"]["max_runtime_seconds"])
+    _repair_require(timing["stage"] == "VERIFYING" and timing["unit_id"] == unit["unit_id"]
+                    and timing["attempt_id"] == attempt["attempt_id"])
+    budget = {"accounting_sha256": digest({"budgets": manager["budgets"], "limits": unit["spec"]["limits"],
+                                         "timing": timing, "runtime": runtime, "elapsed": elapsed}),
+              "task_runtime_seconds": runtime, "unit_elapsed_seconds": elapsed,
+              "unit_deadline": timing["stage_start_clock"] + timeout - timing["attempt_elapsed_at_start"]}
+    _repair_require(budget["unit_deadline"] > timing["stage_start_clock"])
+    return session, budget
+
+
+def _repair_session(state):
+    controller = state["supervision"]["controller"]
+    _repair_require(type(controller) is dict and type(controller["identity"]) is dict)
+    manager = state["manager"]
+    _repair_require(type(manager["session"]) is int and manager["session"] >= 0)
+    session = {"manager_session": manager["session"], "recovery_sha256": digest(state["recovery"]),
+               "controller_sha256": digest({k: controller[k] for k in ("pid", "identity", "boot")})}
+    return session
+
+
+def validate_repair_recovery(state):
+    if "repair_recovery" not in state:
+        _repair_require("repair_dispatch" not in state and "repair_verification" not in state)
+        return
+    try:
+        mode = state["repair_recovery"]
+        allocation = type(mode) is dict and type(mode.get("schema_version")) is int and mode["schema_version"] in (2, 3, 4)
+        dispatch = allocation and mode["schema_version"] in (3, 4)
+        _repair_fields(mode, "schema_version mode recovery_id run_id unit_id source_attempt_id spec_sha256 "
+                       "registry_sha256 controller_session budgets_sha256 environment_sha256 baseline_fingerprint "
+                       "started_clock task_deadline" + (" operation" if allocation else "")
+                       + (" offline_recipe offline_sources" if dispatch else ""))
+        _repair_require(type(mode["schema_version"]) is int and mode["schema_version"] in (1, 2, 3, 4)
+                        and type(mode["mode"]) is str and mode["mode"] == "ACTIVE")
+        if allocation:
+            _repair_require(type(mode["operation"]) is str and mode["operation"] ==
+                            ({2: "ALLOCATE_ONLY", 3: "OFFLINE_DISPATCH", 4: "OFFLINE_VERIFY"}[mode["schema_version"]]))
+        if mode["schema_version"] != 4:
+            _repair_require("repair_verification" not in state)
+        if dispatch:
+            from offline_scripted_executor import validate_script, _json, OfflineExecutorError
+            recipe = mode["offline_recipe"]
+            _repair_fields(recipe, "script allowed_paths forbidden_paths timeout_seconds")
+            try:
+                validate_script(recipe["script"], recipe["allowed_paths"], recipe["forbidden_paths"])
+            except OfflineExecutorError as exc:
+                raise DurableError("Invalid frozen offline recipe") from exc
+            _repair_require(len(_json(recipe)) <= 8192 and type(recipe["timeout_seconds"]) in (int, float)
+                            and math.isfinite(recipe["timeout_seconds"]) and 0 < recipe["timeout_seconds"] <= 3600)
+            _repair_fields(mode["offline_sources"], "offline_scripted_executor.py offline_scripted_executor_worker.py winprocess.py")
+            for sha in mode["offline_sources"].values():
+                _repair_sha(sha)
+        else:
+            _repair_require("repair_dispatch" not in state and "repair_verification" not in state)
+        _repair_require(type(mode["recovery_id"]) is str and re.fullmatch(r"[0-9a-f]{32}", mode["recovery_id"]))
+        _repair_require(mode["run_id"] == state["run_id"] and type(mode["run_id"]) is str
+                        and type(mode["unit_id"]) is str and type(mode["source_attempt_id"]) is str
+                        and mode["source_attempt_id"] == mode["unit_id"] + "-attempt-1")
+        unit = state["work_units"]["units"][mode["unit_id"]]
+        if dispatch:
+            import work_units
+            _repair_require(unit["spec"]["mode"] == "mutation"
+                            and recipe["allowed_paths"] == unit["spec"]["scope"]["allowed_paths"]
+                            and recipe["forbidden_paths"] == sorted(set(unit["spec"]["scope"]["forbidden_paths"]
+                                                                       + state["manager"]["scope"]["forbidden_paths"]))
+                            and all(any(work_units.covers(a, p) for a in state["manager"]["scope"]["allowed_paths"])
+                                    for p in recipe["allowed_paths"]))
+        _repair_require(unit["spec"]["limits"]["max_attempts"] == 2
+                        and len(unit["attempts"]) <= (2 if allocation else 1))
+        if len(unit["attempts"]) == 2:
+            _validate_repair_allocation(state, state["repair_authorizations"]["repair-" + mode["recovery_id"]])
+        else:
+            _repair_require("repair_dispatch" not in state and "repair_verification" not in state)
+        _repair_require(all("policy_b_shadow" not in a for u in state["work_units"]["units"].values()
+                            for a in u["attempts"]))
+        _repair_require(state["options"]["config"].get("executor") != "safe_qwen"
+                        and state["options"].get("work_unit_executor", {}).get("kind") != "safe_qwen")
+        for key, value in (("spec_sha256", unit["spec"]), ("registry_sha256", state["options"]["verifier_registry"]),
+                           ("budgets_sha256", state["manager"]["budgets"]), ("environment_sha256", state["environment"])):
+            _repair_sha(mode[key])
+            _repair_require(mode[key] == digest(value))
+        _repair_sha(mode["baseline_fingerprint"])
+        _repair_require(encoded(mode["controller_session"]) == encoded(_repair_session(state)))
+        for key in ("started_clock", "task_deadline"):
+            _repair_require(type(mode[key]) in (int, float) and math.isfinite(mode[key]) and mode[key] > 0)
+        _repair_require(mode["task_deadline"] > mode["started_clock"])
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
+        raise DurableError("Invalid active recovery identity") from exc
+
+
+def validate_repair_authorizations(state):
+    """Closed GRANTED v1 / allocated CONSUMED v2 schemas; never permissions.
+
+    Only validated Store WAL history can carry this extension. Passing a JSON
+    object through this validator proves shape/relationships, never permission.
+    Absence retains the M0 schema and behavior, including its one-attempt gates.
+    """
+    validate_repair_recovery(state)
+    if "repair_authorizations" not in state:
+        return
+    try:
+        grants = state["repair_authorizations"]
+        _repair_require(type(grants) is dict and bool(grants))
+        seen = set()
+        for aid, grant in grants.items():
+            consumed = (type(grant) is dict and type(grant.get("schema_version")) is int
+                        and grant["schema_version"] == 2 and grant.get("state") == "CONSUMED")
+            _repair_fields(grant, "schema_version state run_id unit_id source_attempt_id authorization_id "
+                           "candidate_fingerprint spec_sha256 registry_sha256 source_wal policy_b policy_wal "
+                           "native_evidence budget recovery_session" + (" consumption" if consumed else ""))
+            _repair_require(type(grant["schema_version"]) is int
+                            and grant["schema_version"] == (2 if consumed else REPAIR_AUTHORIZATION_SCHEMA_VERSION))
+            _repair_require(type(grant["state"]) is str and grant["state"] == ("CONSUMED" if consumed else "GRANTED"))
+            for key in ("run_id", "unit_id", "source_attempt_id", "authorization_id"):
+                _repair_require(type(grant[key]) is str and bool(grant[key]) and len(grant[key]) <= 160)
+            _repair_require(type(aid) is str and aid == grant["authorization_id"]
+                            and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,79}", aid) is not None)
+            _repair_require(grant["run_id"] == state["run_id"])
+            binding = (grant["unit_id"], grant["source_attempt_id"])
+            _repair_require(binding not in seen)
+            seen.add(binding)
+            unit = state["work_units"]["units"][grant["unit_id"]]
+            _repair_require(unit["unit_id"] == grant["unit_id"] and len(unit["attempts"]) == (2 if consumed else 1))
+            if consumed:
+                _validate_repair_allocation(state, grant)
+            attempt = unit["attempts"][0]
+            _repair_require(attempt["attempt_id"] == grant["source_attempt_id"]
+                            and attempt["completed_at"] is not None and attempt["outcome"] == "failed"
+                            and attempt["failure_classification"] == "verification_failed"
+                            and (consumed or (unit["current_attempt"] is None
+                                 and unit["status"] in {"VERIFYING", "REPAIR_PENDING"}))
+                            and unit["spec"]["limits"]["max_attempts"] >= 2)
+            # Shadow observation is permanently diagnostic, including ALLOW.
+            _repair_require("policy_b_shadow" not in attempt)
+            candidate = attempt["candidate_snapshot"]
+            from retry_eligibility import validate_normalize_snapshot
+            _, snapshot_error = validate_normalize_snapshot(candidate, "repair authorization candidate")
+            _repair_require(snapshot_error is None)
+            _repair_sha(grant["candidate_fingerprint"])
+            _repair_require(candidate["fingerprint"] == grant["candidate_fingerprint"]
+                            and digest({k: v for k, v in candidate.items() if k != "fingerprint"}) == candidate["fingerprint"]
+                            and candidate == attempt["verification_snapshot_before"] == attempt["verification_snapshot_after"])
+            for key, value in (("spec_sha256", unit["spec"]),
+                               ("registry_sha256", state["options"]["verifier_registry"])):
+                _repair_sha(grant[key])
+                _repair_require(grant[key] == digest(value))
+            for key in ("source_wal", "policy_wal"):
+                _repair_ref(grant[key])
+            policy = grant["policy_b"]
+            _repair_fields(policy, "policy eligible decision reason_code failed_verifiers")
+            _repair_require(type(policy["policy"]) is str and policy["policy"] == "B"
+                            and policy["eligible"] is True and type(policy["decision"]) is str
+                            and policy["decision"] == "ALLOW" and type(policy["reason_code"]) is str
+                            and policy["reason_code"] == "ALLOW_VERIFIER_FAILURE")
+            failed = policy["failed_verifiers"]
+            _repair_require(type(failed) is list and bool(failed)
+                            and all(type(v) is str for v in failed) and len(set(failed)) == len(failed))
+            evidence = grant["native_evidence"]
+            _repair_require(type(evidence) is dict and set(evidence) == set(unit["spec"]["verifier_ids"]))
+            actual_failed = []
+            for vid, binding in evidence.items():
+                _repair_fields(binding, "child_id invocation_id wal evidence")
+                _repair_require(type(binding["child_id"]) is str and type(binding["invocation_id"]) is str)
+                child = state["supervision"]["children"][binding["child_id"]]
+                inv = child["invocation"]
+                _repair_require(child["token"] == binding["invocation_id"] and child["run_id"] == grant["run_id"]
+                                and child["state"] == "EXITED" and child["termination"] == "natural"
+                                and inv["phase"] == "COMPLETE" and inv["verifier_id"] == vid
+                                and inv["unit_id"] == grant["unit_id"] and inv["attempt_id"] == grant["source_attempt_id"])
+                for key in ("spec_sha256", "registry_sha256", "candidate_fingerprint"):
+                    _repair_require(inv[key] == grant[key])
+                if child["exit_code"] != 0:
+                    actual_failed.append(vid)
+                _repair_fields(binding["wal"], " ".join(_INVOCATION_EVENTS))
+                for ref in binding["wal"].values():
+                    _repair_ref(ref)
+                _repair_fields(binding["evidence"], "path sha256")
+                _repair_sha(binding["evidence"]["sha256"])
+                _repair_require(binding["evidence"]["path"] ==
+                                f"repair-evidence/{grant['source_attempt_id']}/{binding['invocation_id']}.json")
+            _repair_require(failed == sorted(actual_failed))
+            # Budget evidence is historical, not reset when runtime advances.
+            # Issuance replay additionally checks this against source_wal.
+            historical = copy.deepcopy(state)
+            historical["manager"]["runtime_seconds"] = grant["budget"]["task_runtime_seconds"]
+            session, budget = _repair_context(historical, unit, attempt)
+            _repair_require(state["manager"]["runtime_seconds"] >= grant["budget"]["task_runtime_seconds"])
+            _repair_fields(grant["recovery_session"], "manager_session recovery_sha256 controller_sha256")
+            _repair_require(type(grant["recovery_session"]["manager_session"]) is int)
+            for key in ("recovery_sha256", "controller_sha256"):
+                _repair_sha(grant["recovery_session"][key])
+            _repair_fields(grant["budget"], "accounting_sha256 task_runtime_seconds unit_elapsed_seconds unit_deadline")
+            _repair_sha(grant["budget"]["accounting_sha256"])
+            for key in ("task_runtime_seconds", "unit_elapsed_seconds", "unit_deadline"):
+                value = grant["budget"][key]
+                _repair_require(type(value) in (int, float) and math.isfinite(value) and value >= 0)
+            _repair_require(grant["recovery_session"] == session and grant["budget"] == budget)
+    except (KeyError, TypeError, ValueError, IndexError) as exc:
+        raise DurableError("Invalid repair authorization schema or binding") from exc
+
+
+def _granted_form(grant):
+    """Immutable historical value for comparison, never an issuance capability."""
+    value = copy.deepcopy(grant)
+    value.pop("consumption", None)
+    value.update(schema_version=1, state="GRANTED")
+    return value
+
+
+def _allocated_repair_section(section, grant, consumption):
+    """Use legal WorkUnit APIs to construct the one deterministic allocation."""
+    import work_units
+    section = copy.deepcopy(section)
+    unit = section["units"][grant["unit_id"]]
+    for status in ("REPAIR_PENDING", "READY", "EXECUTING"):
+        work_units.transition_unit(unit, status)
+    attempt = work_units.create_attempt(unit, consumption["attempt_id"])
+    attempt.update(stage="allocated", started_at=consumption["allocated_at"], repair_authorization={
+        "authorization_id": grant["authorization_id"], "grant_wal": copy.deepcopy(consumption["grant_wal"]),
+        "granted_sha256": consumption["granted_sha256"]})
+    if consumption["schema_version"] == 2:
+        attempt["ai_execution_id"] = consumption["ai_binding"]["execution_id"]
+        attempt["ai_worker_sha256"] = consumption["ai_binding"]["worker_sha256"]
+    unit["updated_at"] = consumption["allocated_at"]
+    work_units.seal_unit_state(unit)
+    work_units._reseal_section(section)
+    return section
+
+
+def _validate_repair_allocation(state, grant):
+    """Validate allocation and only its explicitly selected, closed extensions."""
+    try:
+        ai = state.get("safe_qwen_active_recovery", {}).get("schema_version") in (5, 6, 7)
+        if ai:
+            from safe_qwen_active_grant import allocation_mode, ai_binding
+            mode = allocation_mode(state)
+            _repair_require("repair_recovery" not in state and "repair_dispatch" not in state and "repair_verification" not in state)
+        else:
+            mode = state["repair_recovery"]
+            _repair_require(type(mode["schema_version"]) is int and mode["schema_version"] in (2, 3, 4)
+                            and mode["operation"] == {2: "ALLOCATE_ONLY", 3: "OFFLINE_DISPATCH", 4: "OFFLINE_VERIFY"}[mode["schema_version"]])
+        _repair_require(type(grant["schema_version"]) is int and grant["schema_version"] == 2
+                        and grant["state"] == "CONSUMED" and grant["run_id"] == mode["run_id"] == state["run_id"]
+                        and grant["unit_id"] == mode["unit_id"] and grant["source_attempt_id"] == mode["source_attempt_id"]
+                        and grant["authorization_id"] == "repair-" + mode["recovery_id"])
+        c = grant["consumption"]
+        _repair_fields(c, "schema_version attempt_id grant_wal granted_sha256 allocated_at checked_clock "
+                       "task_runtime_seconds unit_elapsed_seconds task_deadline unit_deadline controller_session" + (" ai_binding" if ai else ""))
+        _repair_require(type(c["schema_version"]) is int and c["schema_version"] == (2 if ai else 1)
+                        and type(c["attempt_id"]) is str and c["attempt_id"] == mode["unit_id"] + "-attempt-2")
+        if ai:
+            _repair_require(c["ai_binding"] == ai_binding(state["safe_qwen_active_recovery"]))
+            _repair_require(c["checked_clock"] < state["safe_qwen_active_recovery"]["identity"]["deadline"])
+        _repair_ref(c["grant_wal"])
+        _repair_sha(c["granted_sha256"])
+        _repair_require(c["granted_sha256"] == digest(_granted_form(grant)))
+        _repair_require(type(c["allocated_at"]) is str
+                        and datetime.fromisoformat(c["allocated_at"]).tzinfo is not None)
+        for key in ("checked_clock", "task_runtime_seconds", "unit_elapsed_seconds", "task_deadline", "unit_deadline"):
+            _repair_require(type(c[key]) in (int, float) and math.isfinite(c[key]) and c[key] >= 0)
+        runtime = state["manager"]["runtime_seconds"]
+        maximum = state["manager"]["budgets"]["max_runtime_seconds"]
+        _repair_require(type(runtime) in (int, float) and math.isfinite(runtime)
+                        and maximum - c["task_runtime_seconds"] >= 1
+                        and min(c["task_deadline"], c["unit_deadline"]) - c["checked_clock"] >= 1
+                        and math.isclose(c["task_runtime_seconds"], maximum - (c["task_deadline"] - c["checked_clock"]),
+                                         rel_tol=0, abs_tol=0.000001))
+        _repair_require(c["task_deadline"] == mode["task_deadline"]
+                        and c["unit_deadline"] == grant["budget"]["unit_deadline"]
+                        and mode["started_clock"] <= c["checked_clock"] < min(c["task_deadline"], c["unit_deadline"])
+                        and c["unit_elapsed_seconds"] == c["checked_clock"] - mode["started_clock"]
+                        and c["unit_elapsed_seconds"] >= grant["budget"]["unit_elapsed_seconds"]
+                        and grant["budget"]["task_runtime_seconds"] <= c["task_runtime_seconds"]
+                        <= state["manager"]["runtime_seconds"]
+                        and c["task_runtime_seconds"] < state["manager"]["budgets"]["max_runtime_seconds"]
+                        and encoded(c["controller_session"]) == encoded(mode["controller_session"]) == encoded(grant["recovery_session"]))
+        unit = state["work_units"]["units"][mode["unit_id"]]
+        _repair_require(len(unit["attempts"]) == 2 and unit["attempts"][0]["completed_at"] is not None)
+        attempt = unit["attempts"][1]
+        expected = dict(attempt_id=c["attempt_id"], started_at=c["allocated_at"], completed_at=None,
+                        outcome="interrupted", execution_result=None, changed_paths=[], verifier_result=None,
+                        failure_classification=None, candidate_id=None, timeout_info=None, stage="allocated",
+                        repair_authorization={"authorization_id": grant["authorization_id"],
+                                              "grant_wal": c["grant_wal"], "granted_sha256": c["granted_sha256"]})
+        if ai:
+            expected.update(ai_execution_id=c["ai_binding"]["execution_id"], ai_worker_sha256=c["ai_binding"]["worker_sha256"])
+        active = state.get("safe_qwen_active_recovery", {})
+        if active.get("schema_version") == 7 and active.get("dispatch") is not None:
+            from safe_qwen_active_verification import second_project
+            _repair_require(state["work_units"] == second_project(state))
+        elif active.get("schema_version") == 6 and active.get("dispatch") is not None:
+            from safe_qwen_active_dispatch import allocated_section, project
+            _repair_require(state["work_units"] == project(allocated_section(state), grant, active["dispatch"]))
+        elif "repair_dispatch" in state:
+            _validate_repair_dispatch(state)
+            projected = _repair_dispatch_section(state["work_units"], grant, state["repair_dispatch"])
+            if "repair_verification" in state:
+                _validate_repair_verification(state)
+            else:
+                _repair_require(encoded(unit) == encoded(projected["units"][grant["unit_id"]]))
+        else:
+            _repair_require(unit["status"] == "EXECUTING" and unit["current_attempt"] == c["attempt_id"]
+                            and encoded(attempt) == encoded(expected))
+    except (KeyError, TypeError, ValueError, IndexError, OverflowError) as exc:
+        raise DurableError("Invalid consumed repair allocation; dispatch is prohibited") from exc
+
+
+def _repair_dispatch_section(section, grant, dispatch):
+    """Deterministic Attempt 2 executor stages; success still awaits verification."""
+    import work_units
+    section = copy.deepcopy(section)
+    unit = section["units"][grant["unit_id"]]
+    c = grant["consumption"]
+    unit["status"], unit["current_attempt"] = "EXECUTING", c["attempt_id"]
+    att = dict(attempt_id=c["attempt_id"], started_at=c["allocated_at"], completed_at=None,
+               outcome="interrupted", execution_result=None, changed_paths=[], verifier_result=None,
+               failure_classification=None, candidate_id=None, timeout_info=None, stage="allocated",
+               repair_authorization={"authorization_id": grant["authorization_id"],
+                                     "grant_wal": c["grant_wal"], "granted_sha256": c["granted_sha256"]})
+    unit["attempts"][1] = att
+    att["stage"] = {"INTENT": "dispatch_intent", "BOUND": "dispatch_bound",
+                    "RELEASED": "dispatch_released", "COMPLETE": "executor_complete"}[dispatch["phase"]]
+    if dispatch["phase"] == "COMPLETE":
+        result = dispatch["result"]
+        att.update(execution_result={"dispatch_evidence": dispatch["evidence"]}, changed_paths=result["changed_paths"],
+                   timeout_info={"elapsed_seconds": result["elapsed_seconds"],
+                                 "stage_timeout": dispatch["deadline"] - c["checked_clock"]})
+        if result["outcome"] != "executor_succeeded":
+            work_units.complete_attempt(unit, c["attempt_id"], outcome="timeout" if result["outcome"] == "executor_timeout" else "failed",
+                                        execution_result=att["execution_result"], changed_paths=att["changed_paths"],
+                                        timeout_info=att["timeout_info"], failure_classification=result["outcome"])
+            att["completed_at"] = dispatch["updated_at"]
+            work_units.transition_unit(unit, "UNIT_FAILED")
+    unit["updated_at"] = dispatch["updated_at"]
+    work_units.seal_unit_state(unit)
+    work_units._reseal_section(section)
+    return section
+
+
+def _validate_repair_dispatch(state, read_evidence=None):
+    try:
+        _check_repair_dispatch(state, read_evidence)
+    except (KeyError, TypeError, ValueError, IndexError, OverflowError, UnicodeError) as exc:
+        raise DurableError("Invalid offline dispatch lifecycle") from exc
+
+
+def _check_repair_dispatch(state, read_evidence=None):
+    """Closed consistency schema; only the registered live capability can write it."""
+    d = state["repair_dispatch"]
+    mode = state["repair_recovery"]
+    _repair_require((mode["schema_version"], mode["operation"]) in {(3, "OFFLINE_DISPATCH"), (4, "OFFLINE_VERIFY")})
+    _repair_fields(d, "schema_version dispatch_id phase run_id unit_id source_attempt_id attempt_id authorization_id "
+                   "consumption_wal previous_wal controller_session candidate_fingerprint spec_sha256 registry_sha256 "
+                   "environment_sha256 repository request_sha256 script_sha256 sources_sha256 before_snapshot_sha256 "
+                   "job deadline checked_clock task_runtime_seconds updated_at process evidence result")
+    _repair_require(type(d["schema_version"]) is int and d["schema_version"] == 1
+                    and d["phase"] in {"INTENT", "BOUND", "RELEASED", "COMPLETE"}
+                    and d["dispatch_id"] == "dispatch-" + mode["recovery_id"]
+                    and d["authorization_id"] == "repair-" + mode["recovery_id"]
+                    and d["run_id"] == state["run_id"] == mode["run_id"]
+                    and d["unit_id"] == mode["unit_id"] and d["source_attempt_id"] == mode["source_attempt_id"]
+                    and d["attempt_id"] == mode["unit_id"] + "-attempt-2")
+    g = state["repair_authorizations"][d["authorization_id"]]
+    _repair_require(g["state"] == "CONSUMED" and d["controller_session"] == mode["controller_session"]
+                    and d["repository"] == state["target_repository"] and d["sources_sha256"] == mode["offline_sources"])
+    for key in ("candidate_fingerprint", "spec_sha256", "registry_sha256"):
+        _repair_require(d[key] == g[key])
+    _repair_require(d["environment_sha256"] == mode["environment_sha256"])
+    for key in ("request_sha256", "script_sha256", "before_snapshot_sha256"):
+        _repair_sha(d[key])
+    from offline_scripted_executor import _json
+    recipe = mode["offline_recipe"]
+    _repair_require(d["script_sha256"] == hashlib.sha256(_json(recipe["script"])).hexdigest())
+    payload = dict(schema_version=1, repository=d["repository"], script=recipe["script"],
+                   allowed_paths=recipe["allowed_paths"], forbidden_paths=recipe["forbidden_paths"], script_sha256=d["script_sha256"])
+    _repair_require(d["request_sha256"] == hashlib.sha256(_json(payload)).hexdigest())
+    _repair_ref(d["consumption_wal"])
+    if d["previous_wal"] is not None:
+        _repair_ref(d["previous_wal"])
+    _repair_require(type(d["job"]) is str and re.fullmatch(r"Local\\triglav-offline-[0-9a-f]{32}", d["job"]))
+    _repair_require(type(d["updated_at"]) is str and datetime.fromisoformat(d["updated_at"]).tzinfo is not None)
+    for key in ("deadline", "checked_clock", "task_runtime_seconds"):
+        _repair_require(type(d[key]) in (int, float) and math.isfinite(d[key]) and d[key] >= 0)
+    _repair_require(g["consumption"]["checked_clock"] < d["deadline"] <= min(mode["task_deadline"], g["budget"]["unit_deadline"])
+                    and d["deadline"] - d["checked_clock"] <= recipe["timeout_seconds"]
+                    and d["checked_clock"] >= g["consumption"]["checked_clock"]
+                    and g["consumption"]["task_runtime_seconds"] <= d["task_runtime_seconds"] <= state["manager"]["runtime_seconds"]
+                    and math.isclose(d["task_runtime_seconds"], state["manager"]["budgets"]["max_runtime_seconds"]
+                                     - (mode["task_deadline"] - d["checked_clock"]), rel_tol=0, abs_tol=0.000001))
+    if d["phase"] != "COMPLETE":
+        _repair_require(d["checked_clock"] < d["deadline"] and d["evidence"] is None and d["result"] is None)
+    if d["phase"] in {"BOUND", "RELEASED"} or d["process"] is not None:
+        p = d["process"]
+        _repair_fields(p, "pid identity")
+        _repair_fields(p["identity"], "created executable")
+        _repair_require(type(p["pid"]) is int and p["pid"] > 0 and type(p["identity"]["created"]) is str
+                        and p["identity"]["created"].isdigit() and p["identity"]["executable"] == os.path.normcase(str(Path(sys.executable).resolve())))
+    if d["phase"] == "INTENT":
+        _repair_require(d["process"] is None and d["previous_wal"] is None)
+    if d["phase"] == "COMPLETE":
+        _repair_fields(d["evidence"], "path sha256")
+        _repair_sha(d["evidence"]["sha256"])
+        _repair_require(d["evidence"]["path"] == "dispatch-evidence/" + d["dispatch_id"] + ".json")
+        result = d["result"]
+        _repair_fields(result, "outcome changed_paths elapsed_seconds")
+        _repair_require(result["outcome"] in {"executor_succeeded", "executor_failed", "executor_timeout"}
+                        and type(result["changed_paths"]) is list and len(result["changed_paths"]) <= 64
+                        and all(type(p) is str and len(p) <= 240 for p in result["changed_paths"])
+                        and type(result["elapsed_seconds"]) in (int, float) and math.isfinite(result["elapsed_seconds"])
+                        and result["elapsed_seconds"] >= 0)
+        first = state["work_units"]["units"][d["unit_id"]]["attempts"][0]
+        _repair_require(result["elapsed_seconds"] == d["checked_clock"] - mode["started_clock"] - first["timeout_info"]["elapsed_seconds"])
+        if read_evidence:
+            evidence = read_evidence(d["evidence"])
+            _repair_fields(evidence, "schema_version source operation repository request_sha256 before_snapshot_sha256 "
+                           "after_snapshot_sha256 script_sha256 sources_sha256 process job identity_verified execution_started "
+                           "termination_basis observed_exit_code cleanup execution_seconds duration_seconds diagnostics "
+                           "action_result changed_paths changed_path_count scope_verified exact_edits_verified success deadline_monotonic")
+            for key in ("request_sha256", "script_sha256", "sources_sha256", "before_snapshot_sha256", "repository", "job", "process"):
+                _repair_require(evidence[key] == d[key])
+            _repair_require(type(evidence["schema_version"]) is int and evidence["schema_version"] == 1
+                            and evidence["source"] == "controller_native_handles"
+                            and evidence["operation"] == "offline_scripted_actions" and evidence["deadline_monotonic"] == d["deadline"]
+                            and len(_json(evidence)) <= 32768 and type(evidence["success"]) is bool
+                            and evidence["changed_paths"] == result["changed_paths"])
+            _repair_require(all(type(evidence[k]) is bool for k in
+                                ("identity_verified", "execution_started", "scope_verified", "exact_edits_verified"))
+                            and evidence["cleanup"] in {"observed_empty", "not_observed"}
+                            and evidence["termination_basis"] in {"not_started", "controller_exception", "controller_deadline",
+                                                                   "controller_cancel", "signaled_without_controller_termination"}
+                            and (evidence["observed_exit_code"] is None or
+                                 (type(evidence["observed_exit_code"]) is int and 0 <= evidence["observed_exit_code"] <= 0xffffffff))
+                            and type(evidence["changed_path_count"]) is int
+                            and evidence["changed_path_count"] >= len(result["changed_paths"]))
+            for key in ("execution_seconds", "duration_seconds"):
+                _repair_require(type(evidence[key]) in (int, float) and math.isfinite(evidence[key]) and evidence[key] >= 0)
+            _repair_require(evidence["execution_seconds"] <= evidence["duration_seconds"])
+            if evidence["after_snapshot_sha256"] is not None:
+                _repair_sha(evidence["after_snapshot_sha256"])
+            action = evidence["action_result"]
+            if action is not None:
+                _repair_fields(action, "schema_version script_sha256 status actions_completed error")
+                count = len(recipe["script"]["actions"])
+                _repair_require(type(action["schema_version"]) is int and action["schema_version"] == 1
+                                and action["script_sha256"] == d["script_sha256"]
+                                and type(action["actions_completed"]) is int and 0 <= action["actions_completed"] <= count)
+                if action["status"] == "ok":
+                    _repair_require(action["actions_completed"] == count and action["error"] is None and evidence["observed_exit_code"] == 0)
+                else:
+                    _repair_require(action["status"] == "failed" and action["actions_completed"] < count
+                                    and type(action["error"]) is str and len(action["error"].encode("utf-8")) <= 512
+                                    and all(c.isprintable() or c in "\n\t" for c in action["error"])
+                                    and evidence["observed_exit_code"] == 10)
+            timed_out = (evidence["termination_basis"] == "controller_deadline"
+                         or d["checked_clock"] >= min(mode["task_deadline"], g["budget"]["unit_deadline"]))
+            _repair_require(result["outcome"] == ("executor_timeout" if timed_out else
+                            "executor_succeeded" if evidence["success"] else "executor_failed"))
+            diagnostics = evidence["diagnostics"]
+            _repair_fields(diagnostics, "text bytes_observed truncated")
+            _repair_require(type(diagnostics["text"]) is str and len(diagnostics["text"].encode("utf-8")) <= 4096
+                            and all(c.isprintable() or c in "\n\t" for c in diagnostics["text"])
+                            and type(diagnostics["bytes_observed"]) is int and diagnostics["bytes_observed"] >= 0
+                            and type(diagnostics["truncated"]) is bool)
+            if result["outcome"] == "executor_succeeded":
+                _repair_require(action is not None and action["status"] == "ok"
+                                and evidence["success"] is True and evidence["cleanup"] == "observed_empty"
+                                and evidence["identity_verified"] is True and evidence["execution_started"] is True
+                                and evidence["scope_verified"] is True and evidence["exact_edits_verified"] is True
+                                and evidence["termination_basis"] == "signaled_without_controller_termination"
+                                and type(evidence["observed_exit_code"]) is int and evidence["observed_exit_code"] == 0
+                                and d["checked_clock"] < min(mode["task_deadline"], g["budget"]["unit_deadline"]))
+
+
+def _validate_repair_verification(state):
+    """Closed offline qualification state; passing never promotes the unit."""
+    try:
+        from retry_eligibility import validate_normalize_snapshot
+        from supervision import checksum
+        m, d, v = state["repair_recovery"], state["repair_dispatch"], state["repair_verification"]
+        _repair_require((m["schema_version"], m["operation"]) == (4, "OFFLINE_VERIFY")
+                        and d["phase"] == "COMPLETE" and d["result"]["outcome"] == "executor_succeeded")
+        _repair_fields(v, "schema_version phase run_id unit_id attempt_id dispatch_id dispatch_wal dispatch_evidence "
+                       "controller_session candidate_fingerprint candidate_fs_sha256 tree_sha256 tree_snapshot checked_clock "
+                       "task_runtime_seconds updated_at attempt_sha256")
+        _repair_require(type(v["schema_version"]) is int and v["schema_version"] == 1
+                        and v["phase"] in {"STARTED", "OBSERVING", "COMPLETE"})
+        for k in ("run_id", "unit_id", "attempt_id", "dispatch_id"):
+            _repair_require(type(v[k]) is str and v[k] == d[k])
+        _repair_require(v["dispatch_evidence"] == d["evidence"] and v["controller_session"] == m["controller_session"])
+        _repair_ref(v["dispatch_wal"])
+        for k in ("candidate_fingerprint", "candidate_fs_sha256", "tree_sha256", "attempt_sha256"):
+            _repair_sha(v[k])
+        for k in ("checked_clock", "task_runtime_seconds"):
+            _repair_require(type(v[k]) in (int, float) and math.isfinite(v[k]) and v[k] >= 0)
+        _repair_require(v["checked_clock"] >= d["checked_clock"]
+                        and d["task_runtime_seconds"] <= v["task_runtime_seconds"] <= state["manager"]["runtime_seconds"]
+                        and math.isclose(v["task_runtime_seconds"], state["manager"]["budgets"]["max_runtime_seconds"]
+                                         - (m["task_deadline"] - v["checked_clock"]), rel_tol=0, abs_tol=0.000001)
+                        and type(v["updated_at"]) is str and datetime.fromisoformat(v["updated_at"]).tzinfo is not None)
+        g = state["repair_authorizations"][d["authorization_id"]]
+        unit = state["work_units"]["units"][v["unit_id"]]
+        att = unit["attempts"][1]
+        base = _repair_dispatch_section(state["work_units"], g, d)["units"][v["unit_id"]]["attempts"][1]
+        mutable = {"stage", "completed_at", "outcome", "failure_classification", "verifier_result", "timeout_info"}
+        extras = {"started_at_clock", "repair_observation"}
+        if v["phase"] != "STARTED":
+            extras.add("stage_timing")
+        if v["phase"] == "COMPLETE":
+            extras.update({"candidate_snapshot", "verification_snapshot_before", "verification_snapshot_after"})
+        _repair_require(set(att) == set(base) | extras and digest(att) == v["attempt_sha256"]
+                        and all(att[k] == base[k] for k in set(base) - mutable)
+                        and type(att["started_at_clock"]) in (int, float)
+                        and att["started_at_clock"] == m["started_clock"] + unit["attempts"][0]["timeout_info"]["elapsed_seconds"])
+        o = att["repair_observation"]
+        fields = {"policy", "mode", "phase", "registry_sha256", "candidate_snapshot", "candidate_fs_snapshot", "observations"}
+        before = {"verification_snapshot_before", "verification_fs_snapshot_before", "verification_tree_before_sha256"}
+        final = {"verification_snapshot_after", "verification_fs_snapshot_after", "verification_tree_after_sha256", "environment_comparison", "decision", "verification_complete"}
+        _repair_require(set(o) in (fields, fields | before, fields | before | final)
+                        and o["policy"] == "B" and o["mode"] == "ACTIVE" and o["registry_sha256"] == m["registry_sha256"]
+                        and o["phase"] == {"STARTED": "STARTED", "OBSERVING": "OBSERVING", "COMPLETE": "OBSERVATIONS_COMPLETE"}[v["phase"]]
+                        and type(o["observations"]) is dict
+                        and set(o["observations"]) == set(unit["spec"]["verifier_ids"][:len(o["observations"])])
+                        and digest(o["candidate_fs_snapshot"]) == v["candidate_fs_sha256"])
+        _, error = validate_normalize_snapshot(o["candidate_snapshot"], "offline repair candidate")
+        _repair_require(error is None and o["candidate_snapshot"]["fingerprint"] == v["candidate_fingerprint"])
+        from offline_scripted_executor import _json, MAX_TREE_ENTRIES, MAX_TREE_BYTES
+        import stat
+        tree = v["tree_snapshot"]
+        _repair_require(type(tree) is dict and 0 < len(tree) <= MAX_TREE_ENTRIES
+                        and hashlib.sha256(_json(tree)).hexdigest() == v["tree_sha256"])
+        fs, total, names = {}, 0, set()
+        for path, entry in tree.items():
+            _repair_require(type(path) is str and 0 < len(path) <= 240 and path.lower() not in names
+                            and not Path(path).is_absolute() and "\\" not in path and ":" not in path
+                            and all(p not in {"", ".", ".."} for p in path.split("/")) and type(entry) is list)
+            names.add(path.lower())
+            if len(entry) == 2 and entry[0] == "directory":
+                _repair_require(type(entry[1]) is int and stat.S_ISDIR(entry[1]))
+            else:
+                _repair_require(len(entry) == 3 and type(entry[1]) is int and entry[1] >= 0
+                                and type(entry[2]) is int and stat.S_ISREG(entry[2]))
+                _repair_sha(entry[0])
+                total += entry[1]
+                fs[path] = dict(sha256=entry[0], size=entry[1], mode=entry[2])
+        _repair_require(total <= MAX_TREE_BYTES and type(o["candidate_fs_snapshot"]) is dict and fs == o["candidate_fs_snapshot"])
+        def validate_fs(value):
+            _repair_require(type(value) is dict and 0 < len(value) <= MAX_TREE_ENTRIES)
+            seen = set()
+            for path, info in value.items():
+                _repair_require(type(path) is str and 0 < len(path) <= 240 and path.lower() not in seen
+                                and not Path(path).is_absolute() and "\\" not in path and ":" not in path
+                                and all(p not in {"", ".", ".."} for p in path.split("/")))
+                seen.add(path.lower())
+                _repair_fields(info, "sha256 size mode")
+                _repair_sha(info["sha256"])
+                _repair_require(type(info["size"]) is int and info["size"] >= 0
+                                and type(info["mode"]) is int and stat.S_ISREG(info["mode"]))
+            _repair_require(sum(x["size"] for x in value.values()) <= MAX_TREE_BYTES)
+        def validate_pair(canonical, filesystem):
+            validate_fs(filesystem)
+            for path, entry in canonical["files"].items():
+                _repair_require((entry is None and path not in filesystem) or (entry is not None and path in filesystem
+                                and entry["sha256"] == filesystem[path]["sha256"]
+                                and entry["mode"] == stat.S_IMODE(filesystem[path]["mode"])))
+        candidate, source = o["candidate_snapshot"], unit["attempts"][0]["candidate_snapshot"]
+        _repair_require(all(candidate[k] == source[k] for k in ("repository", "git_directory", "git_identity", "head", "branch", "index_sha256")))
+        validate_pair(candidate, fs)
+        source_fs = unit["attempts"][0]["repair_observation"]["candidate_fs_snapshot"]
+        mutations = sorted(p for p in fs.keys() | source_fs.keys() if fs.get(p) != source_fs.get(p))
+        _repair_require(mutations == d["result"]["changed_paths"])
+        for k in ("verification_snapshot_before", "verification_snapshot_after"):
+            if k in o:
+                _, error = validate_normalize_snapshot(o[k], k)
+                _repair_require(error is None)
+                validate_pair(o[k], o[k.replace("snapshot", "fs_snapshot")])
+        for k in ("verification_tree_before_sha256", "verification_tree_after_sha256"):
+            if k in o:
+                _repair_sha(o[k])
+        for vid, obs in o["observations"].items():
+            _repair_fields(obs, "binding native after_snapshot after_fs_snapshot after_tree_sha256")
+            _repair_sha(obs["after_tree_sha256"])
+            b, n = obs["binding"], obs["native"]
+            _repair_fields(b, "child_id invocation_id wal")
+            _repair_require(type(b["child_id"]) is str and type(b["wal"]) is dict and set(b["wal"]) == set(_INVOCATION_EVENTS)
+                            and all(type(x) is int and x > 0 for x in b["wal"].values()))
+            child = state["supervision"]["children"][b["child_id"]]
+            inv = child["invocation"]
+            _repair_require(b["invocation_id"] == child["token"] and child["state"] == "EXITED" and inv["phase"] == "COMPLETE"
+                            and inv["unit_id"] == v["unit_id"] and inv["attempt_id"] == v["attempt_id"]
+                            and inv["verifier_id"] == vid and inv["candidate_fingerprint"] == v["candidate_fingerprint"]
+                            and inv["spec_sha256"] == m["spec_sha256"] and inv["registry_sha256"] == m["registry_sha256"])
+            _repair_fields(n, "schema_version source child_id broker verifier intended_argv intended_command_sha256 "
+                           "resolved_argv resolved_command_sha256 job termination termination_basis observed_exit_code cleanup execution_started")
+            _repair_require(type(n["schema_version"]) is int and n["schema_version"] == 1
+                            and n["source"] == "controller_native_handles" and n["child_id"] == b["child_id"] and n["broker"] is None
+                            and n["verifier"] == {"pid": child["pid"], "identity": child["identity"]}
+                            and n["job"] == child["job"] and type(n["observed_exit_code"]) is int
+                            and n["observed_exit_code"] == child["exit_code"] and n["cleanup"] == "observed_empty"
+                            and n["execution_started"] is True and n["intended_argv"] == inv["intended_argv"]
+                            and n["resolved_argv"] == inv["resolved_argv"] and n["resolved_command_sha256"] == child["command_sha256"]
+                            and n["intended_command_sha256"] == checksum(inv["intended_argv"])
+                            and (n["termination"], n["termination_basis"], child["termination"]) in {
+                                ("natural", "signaled_without_controller_termination", "natural"),
+                                ("timeout", "controller_deadline", "forced"), ("forced", "controller_cancel", "forced")})
+            _, error = validate_normalize_snapshot(obs["after_snapshot"], "offline verifier after")
+            _repair_require(error is None)
+            validate_pair(obs["after_snapshot"], obs["after_fs_snapshot"])
+        if v["phase"] == "STARTED":
+            _repair_require(att == {**base, "started_at_clock": att["started_at_clock"], "repair_observation": o}
+                            and not o["observations"] and set(o) == fields and unit["status"] == "EXECUTING"
+                            and unit["current_attempt"] == v["attempt_id"])
+        else:
+            timing = att["stage_timing"]
+            _repair_fields(timing, "stage unit_id attempt_id stage_start_clock stage_start_runtime attempt_elapsed_at_start")
+            _repair_require(timing["stage"] == "VERIFYING" and timing["unit_id"] == v["unit_id"] and timing["attempt_id"] == v["attempt_id"])
+            for k in ("stage_start_clock", "stage_start_runtime", "attempt_elapsed_at_start"):
+                _repair_require(type(timing[k]) in (int, float) and math.isfinite(timing[k]) and timing[k] >= 0)
+            _repair_require(timing["stage_start_clock"] <= v["checked_clock"]
+                            and timing["attempt_elapsed_at_start"] == timing["stage_start_clock"] - att["started_at_clock"])
+            if v["phase"] == "OBSERVING":
+                _repair_require(unit["status"] == "VERIFYING" and unit["current_attempt"] == v["attempt_id"]
+                                and att["completed_at"] is None and att["stage"] == "verifying"
+                                and all(att[k] == base[k] for k in mutable - {"stage"}))
+            else:
+                _repair_require(set(o) == fields | before | final and o["decision"] is None
+                                and type(o["verification_complete"]) is bool
+                                and o["verification_complete"] == (set(o["observations"]) == set(unit["spec"]["verifier_ids"])))
+                clean = all(o[k] == o["candidate_snapshot"] for k in ("verification_snapshot_before", "verification_snapshot_after"))
+                clean = clean and all(o[k] == o["candidate_fs_snapshot"] for k in ("verification_fs_snapshot_before", "verification_fs_snapshot_after"))
+                clean = clean and all(x["after_snapshot"] == o["candidate_snapshot"] and x["after_fs_snapshot"] == o["candidate_fs_snapshot"] for x in o["observations"].values())
+                clean = clean and o["verification_tree_before_sha256"] == o["verification_tree_after_sha256"] == v["tree_sha256"]
+                clean = clean and all(x["after_tree_sha256"] == v["tree_sha256"] for x in o["observations"].values())
+                timed = any(x["native"]["termination"] == "timeout" for x in o["observations"].values())
+                timed = timed or v["checked_clock"] >= min(m["task_deadline"], g["budget"]["unit_deadline"])
+                passed = o["verification_complete"] and clean and all(x["native"]["termination"] == "natural" and x["native"]["observed_exit_code"] == 0 for x in o["observations"].values())
+                outcome = "timeout" if timed else "passed" if passed else "failed"
+                failure = "verifier_timeout" if timed else "verifier_tampered_repo" if not clean else "verification_failed" if not passed else None
+                _repair_require(att["outcome"] == outcome and att["failure_classification"] == failure
+                                and att["stage"] == "completed" and att["completed_at"] == v["updated_at"]
+                                and unit["current_attempt"] is None and unit["status"] == ("VERIFYING" if outcome == "passed" else "UNIT_FAILED")
+                                and type(att["verifier_result"]) is dict and set(att["verifier_result"]) == set(o["observations"])
+                                and o["environment_comparison"]["decision"] in {"MATCH", "INFORMATIONAL"})
+                for vid, entry in att["verifier_result"].items():
+                    n = o["observations"][vid]["native"]
+                    _repair_fields(entry, "argv exit_code passed controller_evidence")
+                    _repair_require(entry["argv"] == n["intended_argv"] and type(entry["exit_code"]) is int
+                                    and entry["exit_code"] == n["observed_exit_code"] and type(entry["passed"]) is bool
+                                    and entry["passed"] == (n["termination"] == "natural" and n["observed_exit_code"] == 0)
+                                    and entry["controller_evidence"] == n)
+                _repair_fields(att["timeout_info"], "elapsed_seconds")
+                _repair_require(type(att["timeout_info"]["elapsed_seconds"]) in (int, float)
+                                and att["timeout_info"]["elapsed_seconds"] == v["checked_clock"] - att["started_at_clock"])
+                for k in ("candidate_snapshot", "verification_snapshot_before", "verification_snapshot_after"):
+                    _repair_require(att[k] == o[k])
+    except (KeyError, TypeError, ValueError, IndexError, OverflowError) as exc:
+        raise DurableError("Invalid offline repair verification lifecycle") from exc
+
+
+def _validate_repair_history(records, read_evidence, tail=b""):
+    """Validate the entire extension before Store.load publishes any state.
+
+    Controller decision -> adjacent state_committed GRANTED transaction.
+    Only an uninterrupted active controller may issue it. A pending decision, torn
+    extension, duplicate transition or unproved consumption fails shut.
+    """
+    from supervision import checksum as supervision_checksum
+    previous = {}
+    latest_state_record = None
+    pending = None
+    extension = False
+    sources = {}
+    allocations = {}
+    allocation_sections = {}
+    dispatch_record = None
+    def referenced(ref, before):
+        _repair_ref(ref)
+        _repair_require(ref["sequence"] < before and ref["sequence"] <= len(records))
+        record = records[ref["sequence"] - 1]
+        _repair_require(record["sha256"] == ref["sha256"])
+        return record
+    for record in records:
+        event = record["event"]
+        _repair_require(type(event) is str)
+        _repair_require(not event.startswith("repair_") or event == _REPAIR_DECISION_EVENT)
+        transition = record.get("transition")
+        if type(transition) is dict:
+            transition_event = transition.get("event")
+            _repair_require(not (type(transition_event) is str and transition_event.startswith("repair_")))
+        if event == _REPAIR_DECISION_EVENT:
+            extension = True
+            _repair_require(pending is None and latest_state_record is not None)
+            _repair_fields(record, "sequence time event previous sha256 decision")
+            _repair_require(type(record["sequence"]) is int and type(record["time"]) is str and bool(record["time"]))
+            _repair_fields(record["decision"], "schema_version run_id unit_id source_attempt_id source_wal policy_b recovery_session")
+            pending = record
+            continue
+        if pending is not None:
+            _repair_require(event == "state_committed" and "repair_authorization" in record)
+        if event != "state_committed":
+            _repair_require("repair_authorization" not in record and "repair_dispatch" not in record and "repair_verification" not in record)
+            continue
+        state = record["state"]
+        old_mode = previous.get("repair_recovery")
+        mode = state.get("repair_recovery")
+        mode_marker = record.get("repair_recovery")
+        if old_mode is not None:
+            _repair_require(encoded(mode) == encoded(old_mode) and mode_marker is None)
+        elif mode is not None:
+            extension = True
+            _repair_fields(record, "sequence time event previous sha256 state transition repair_recovery")
+            _repair_require(mode_marker == {"event": "repair_recovery_enabled", "recovery_id": mode["recovery_id"]}
+                            and record.get("transition") is None)
+            uid = mode["unit_id"]
+            _repair_require(not previous["work_units"]["units"][uid]["attempts"]
+                            and not state["work_units"]["units"][uid]["attempts"]
+                            and previous["work_units"]["units"][uid]["status"] == "READY")
+            ignored = {"revision", "updated_at", "repair_recovery"}
+            _repair_require({k: v for k, v in previous.items() if k not in ignored} ==
+                            {k: v for k, v in state.items() if k not in ignored})
+        else:
+            _repair_require(mode_marker is None)
+        if mode is not None:
+            extension = True
+            attempts = state["work_units"]["units"][mode["unit_id"]]["attempts"]
+            if attempts:
+                att = attempts[0]
+                _repair_require(att["attempt_id"] == mode["source_attempt_id"]
+                                and att["started_at_clock"] == mode["started_clock"]
+                                and att["pre_attempt_snapshot"]["fingerprint"] == mode["baseline_fingerprint"]
+                                and att["repair_observation"]["mode"] == "ACTIVE")
+        old = previous.get("repair_authorizations", {})
+        new = state.get("repair_authorizations", {})
+        _repair_require(set(old).issubset(new))
+        changed = [aid for aid in old if encoded(old[aid]) != encoded(new[aid])]
+        added = set(new) - set(old)
+        marker = record.get("repair_authorization")
+        if added:
+            extension = True
+            _repair_require(len(added) == 1 and pending is not None and not changed)
+            _repair_fields(record, "sequence time event previous sha256 state transition repair_authorization")
+            _repair_require(type(record["sequence"]) is int and type(record["time"]) is str and bool(record["time"]))
+            aid = next(iter(added))
+            grant = new[aid]
+            _repair_require(grant["state"] == "GRANTED" and grant["schema_version"] == 1)
+            _repair_require(marker == {"event": _REPAIR_GRANT_EVENT, "authorization_id": aid})
+            source = referenced(grant["source_wal"], pending["sequence"])
+            _repair_require(source is latest_state_record)
+            source_unit = source["state"]["work_units"]["units"][grant["unit_id"]]
+            source_session, source_budget = _repair_context(source["state"], source_unit, source_unit["attempts"][0])
+            _repair_require(grant["recovery_session"] == source_session and grant["budget"] == source_budget
+                            and source_unit["status"] == "VERIFYING")
+            if mode is not None:
+                _repair_require(grant["authorization_id"] == "repair-" + mode["recovery_id"]
+                                and grant["unit_id"] == mode["unit_id"]
+                                and source_unit["attempts"][0]["repair_observation"]["phase"] == "OBSERVATIONS_COMPLETE")
+            sources[aid] = source["state"]
+            _repair_require(referenced(grant["policy_wal"], record["sequence"]) is pending)
+            expected = {k: grant[k] for k in ("schema_version", "run_id", "unit_id", "source_attempt_id",
+                                             "source_wal", "policy_b", "recovery_session")}
+            _repair_require(encoded(pending["decision"]) == encoded(expected))
+            # Issuance must not allocate an attempt or change any execution fact.
+            before = {k: v for k, v in previous.items() if k not in {"revision", "updated_at", "repair_authorizations"}}
+            after = {k: v for k, v in state.items() if k not in {"revision", "updated_at", "repair_authorizations"}}
+            _repair_require(before == after and record.get("transition") is None)
+            for vid, binding in grant["native_evidence"].items():
+                seqs = []
+                for inv_event in _INVOCATION_EVENTS:
+                    ref_record = referenced(binding["wal"][inv_event], source["sequence"])
+                    _repair_require(ref_record["event"] == "state_committed" and ref_record.get("transition") ==
+                                    {"event": inv_event, "child_id": binding["child_id"]})
+                    seqs.append(ref_record["sequence"])
+                _repair_require(seqs == sorted(set(seqs)))
+                child = state["supervision"]["children"][binding["child_id"]]
+                native = read_evidence(binding["evidence"])
+                _repair_fields(native, "schema_version source child_id broker verifier intended_argv "
+                               "intended_command_sha256 resolved_argv resolved_command_sha256 job termination "
+                               "termination_basis observed_exit_code cleanup execution_started")
+                _repair_fields(native["verifier"], "pid identity")
+                _repair_require(type(native["verifier"]["pid"]) is int and native["broker"] is None
+                                and native["termination_basis"] == "signaled_without_controller_termination"
+                                and native["intended_command_sha256"] ==
+                                supervision_checksum(child["invocation"]["intended_argv"]))
+                _repair_require(type(native) is dict and native.get("child_id") == binding["child_id"]
+                                and type(native.get("schema_version")) is int and native["schema_version"] == 1
+                                and native.get("source") == "controller_native_handles"
+                                and type(native.get("observed_exit_code")) is int
+                                and native.get("job") == child["job"] and native.get("verifier") ==
+                                {"pid": child["pid"], "identity": child["identity"]}
+                                and native.get("observed_exit_code") == child["exit_code"]
+                                and native.get("cleanup") == "observed_empty" and native.get("execution_started") is True
+                                and native.get("termination") == "natural"
+                                and native.get("resolved_command_sha256") == child["command_sha256"]
+                                and native.get("intended_argv") == child["invocation"]["intended_argv"]
+                                and native.get("resolved_argv") == child["invocation"]["resolved_argv"])
+                entry = state["work_units"]["units"][grant["unit_id"]]["attempts"][0]["verifier_result"][vid]
+                _repair_require(entry["controller_evidence"] == native and type(entry["exit_code"]) is int
+                                and entry["exit_code"] == child["exit_code"]
+                                and type(entry["passed"]) is bool and entry["passed"] == (child["exit_code"] == 0))
+            pending = None
+        elif changed:
+            _repair_require(len(changed) == 1 and len(old) == len(new) == 1 and pending is None)
+            _repair_fields(record, "sequence time event previous sha256 state transition repair_authorization")
+            aid = changed[0]
+            before, grant = old[aid], new[aid]
+            _repair_require(before["state"] == "GRANTED" and before["schema_version"] == 1
+                            and grant["state"] == "CONSUMED" and grant["schema_version"] == 2
+                            and encoded(before) == encoded(_granted_form(grant)))
+            _validate_repair_allocation(state, grant)
+            c = grant["consumption"]
+            _repair_require(marker == {"event": _REPAIR_CONSUME_EVENT, "authorization_id": aid, "attempt_id": c["attempt_id"]}
+                            and record.get("transition") is None)
+            grant_record = referenced(c["grant_wal"], record["sequence"])
+            _repair_require(grant_record is latest_state_record and c["grant_wal"]["sequence"] + 1 == record["sequence"]
+                            and grant_record.get("repair_authorization") == {"event": _REPAIR_GRANT_EVENT, "authorization_id": aid}
+                            and c["granted_sha256"] == digest(before))
+            expected = copy.deepcopy(previous)
+            expected.update(repair_authorizations={aid: grant},
+                            work_units=_allocated_repair_section(previous["work_units"], before, c),
+                            revision=previous["revision"] + 1, updated_at=c["allocated_at"])
+            expected["manager"]["runtime_seconds"] = c["task_runtime_seconds"]
+            _repair_require(encoded(state) == encoded(expected))
+            allocations[aid] = copy.deepcopy(state["work_units"]["units"][grant["unit_id"]]["attempts"][1])
+            allocation_sections[aid] = copy.deepcopy(state["work_units"])
+        else:
+            _repair_require(marker is None and pending is None)
+        prior_dispatch, dispatch = previous.get("repair_dispatch"), state.get("repair_dispatch")
+        dispatch_marker = record.get("repair_dispatch")
+        if encoded(dispatch) != encoded(prior_dispatch):
+            _repair_require(dispatch is not None and not added and not changed and mode is not None)
+            _repair_fields(record, "sequence time event previous sha256 state transition repair_dispatch")
+            _validate_repair_dispatch(state, read_evidence)
+            aid = dispatch["authorization_id"]
+            _repair_require(aid in allocation_sections and record.get("transition") is None
+                            and dispatch_marker == {"event": "repair_dispatch_" + dispatch["phase"].lower(),
+                                                    "dispatch_id": dispatch["dispatch_id"]})
+            consumed_record = referenced(dispatch["consumption_wal"], record["sequence"])
+            _repair_require(consumed_record.get("repair_authorization") == {
+                "event": _REPAIR_CONSUME_EVENT, "authorization_id": aid, "attempt_id": dispatch["attempt_id"]}
+                and consumed_record["state"]["repair_authorizations"][aid] == new[aid])
+            if prior_dispatch is None:
+                _repair_require(dispatch["phase"] == "INTENT" and dispatch["previous_wal"] is None)
+            else:
+                _repair_require((prior_dispatch["phase"], dispatch["phase"]) in {
+                    ("INTENT", "BOUND"), ("BOUND", "RELEASED"), ("RELEASED", "COMPLETE"),
+                    ("INTENT", "COMPLETE"), ("BOUND", "COMPLETE")})
+                _repair_require(referenced(dispatch["previous_wal"], record["sequence"]) is dispatch_record)
+                mutable = {"phase", "previous_wal", "checked_clock", "task_runtime_seconds", "updated_at", "process", "evidence", "result"}
+                _repair_require({k: v for k, v in prior_dispatch.items() if k not in mutable} ==
+                                {k: v for k, v in dispatch.items() if k not in mutable}
+                                and dispatch["checked_clock"] >= prior_dispatch["checked_clock"])
+                if dispatch["phase"] != "BOUND":
+                    _repair_require(dispatch["process"] == prior_dispatch["process"])
+                if dispatch["phase"] == "COMPLETE" and prior_dispatch["phase"] != "RELEASED":
+                    ev = read_evidence(dispatch["evidence"])
+                    _repair_require(ev["execution_started"] is False and dispatch["result"]["outcome"] != "executor_succeeded")
+            expected = copy.deepcopy(previous)
+            expected.update(repair_dispatch=dispatch,
+                            work_units=_repair_dispatch_section(allocation_sections[aid], new[aid], dispatch),
+                            revision=previous["revision"] + 1, updated_at=dispatch["updated_at"])
+            expected["manager"]["runtime_seconds"] = dispatch["task_runtime_seconds"]
+            _repair_require(encoded(expected) == encoded(state))
+            dispatch_record = record
+        else:
+            _repair_require(dispatch_marker is None)
+        prior_v, v = previous.get("repair_verification"), state.get("repair_verification")
+        vmarker = record.get("repair_verification")
+        if encoded(v) != encoded(prior_v):
+            _repair_fields(record, "sequence time event previous sha256 state transition repair_verification")
+            _repair_require(v is not None and dispatch == prior_dispatch and dispatch_record is not None
+                            and not added and not changed and record.get("transition") is None)
+            _validate_repair_verification(state)
+            _repair_require(vmarker == {"event": "repair_verification_" + v["phase"].lower(), "dispatch_id": dispatch["dispatch_id"]}
+                            and referenced(v["dispatch_wal"], record["sequence"]) is dispatch_record
+                            and v["tree_sha256"] == read_evidence(dispatch["evidence"])["after_snapshot_sha256"])
+            uid = v["unit_id"]
+            unit, old_unit = state["work_units"]["units"][uid], previous["work_units"]["units"][uid]
+            a, old_a = unit["attempts"][1], old_unit["attempts"][1]
+            o = a["repair_observation"]
+            if prior_v is None:
+                _repair_require(v["phase"] == "STARTED" and old_a["stage"] == "executor_complete"
+                                and old_a["completed_at"] is None)
+            else:
+                _repair_require((prior_v["phase"], v["phase"]) in {
+                    ("STARTED", "OBSERVING"), ("OBSERVING", "OBSERVING"), ("OBSERVING", "COMPLETE")})
+                mutable_v = {"phase", "checked_clock", "task_runtime_seconds", "updated_at", "attempt_sha256"}
+                _repair_require({k: x for k, x in v.items() if k not in mutable_v} ==
+                                {k: x for k, x in prior_v.items() if k not in mutable_v}
+                                and v["checked_clock"] >= prior_v["checked_clock"])
+                old_o = old_a["repair_observation"]
+                _repair_require(set(old_o).issubset(o) and all(o[k] == old_o[k] for k in old_o if k not in {"phase", "observations"})
+                                and set(old_o["observations"]).issubset(o["observations"])
+                                and all(o["observations"][k] == x for k, x in old_o["observations"].items()))
+                if "stage_timing" in old_a:
+                    _repair_require(a["stage_timing"] == old_a["stage_timing"])
+            for vid, obs in o["observations"].items():
+                seqs = []
+                for ev in _INVOCATION_EVENTS:
+                    seq = obs["binding"]["wal"][ev]
+                    _repair_require(seq < record["sequence"] and seq <= len(records))
+                    r = records[seq - 1]
+                    _repair_require(r["event"] == "state_committed" and r.get("transition") == {
+                        "event": ev, "child_id": obs["binding"]["child_id"]}
+                        and seq > v["dispatch_wal"]["sequence"])
+                    seqs.append(seq)
+                _repair_require(seqs == sorted(set(seqs)))
+                all_refs = [r["sequence"] for r in records[:record["sequence"] - 1]
+                            if (r.get("transition") or {}).get("child_id") == obs["binding"]["child_id"]
+                            and (r.get("transition") or {}).get("event") in _INVOCATION_EVENTS]
+                _repair_require(all_refs == seqs)
+            if v["phase"] == "COMPLETE":
+                owned = [c for c in state["supervision"]["children"].values()
+                         if (c.get("invocation") or {}).get("attempt_id") == v["attempt_id"]
+                         and (c.get("invocation") or {}).get("unit_id") == uid]
+                _repair_require(len(owned) == len(o["observations"]) and all(c["invocation"]["phase"] == "COMPLETE" for c in owned))
+            # Qualification may alter only Attempt 2 and its legal status. No
+            # result/checkpoint, another unit, sequence state or source mutation.
+            projected_section = copy.deepcopy(previous["work_units"])
+            projected_unit = projected_section["units"][uid]
+            projected_unit.update(status=unit["status"], current_attempt=unit["current_attempt"], updated_at=v["updated_at"])
+            projected_unit["attempts"][1] = copy.deepcopy(a)
+            import work_units
+            work_units.seal_unit_state(projected_unit)
+            work_units._reseal_section(projected_section)
+            expected = copy.deepcopy(previous)
+            expected.update(repair_verification=v, work_units=projected_section,
+                            revision=previous["revision"] + 1, updated_at=v["updated_at"])
+            expected["manager"]["runtime_seconds"] = v["task_runtime_seconds"]
+            _repair_require(encoded(state) == encoded(expected))
+        else:
+            _repair_require(vmarker is None)
+            if v is not None:
+                _repair_require(state["work_units"] == previous["work_units"])
+        for aid, grant in new.items():
+            historical = sources[aid]
+            uid = grant["unit_id"]
+            attempts = state["work_units"]["units"][uid]["attempts"]
+            _repair_require(attempts[:1] == historical["work_units"]["units"][uid]["attempts"]
+                            and state["work_units"]["units"][uid]["spec"] == historical["work_units"]["units"][uid]["spec"]
+                            and state["manager"]["runtime_seconds"] >= previous.get("manager", {}).get("runtime_seconds", 0))
+            if grant["state"] == "CONSUMED":
+                expected_attempt = (_repair_dispatch_section(allocation_sections[aid], grant, dispatch)["units"][uid]["attempts"][1]
+                                    if dispatch is not None else allocations[aid])
+                _repair_require(aid in allocations and len(attempts) == 2)
+                active = state.get("safe_qwen_active_recovery", {})
+                if active.get("schema_version") == 7 and active.get("dispatch") is not None:
+                    from safe_qwen_active_verification import second_project
+                    _repair_require(state["work_units"] == second_project(state))
+                elif active.get("schema_version") == 6 and active.get("dispatch") is not None:
+                    from safe_qwen_active_dispatch import project
+                    _repair_require(state["work_units"] == project(allocation_sections[aid], grant, active["dispatch"]))
+                elif v is not None:
+                    _validate_repair_verification(state)
+                else:
+                    _repair_require(encoded(attempts[1]) == encoded(expected_attempt))
+            else:
+                _repair_require(len(attempts) == 1)
+        previous = state
+        latest_state_record = record
+    _repair_require(pending is None and not (extension and tail))
 
 
 def validate_terminal_acceptance(term: dict, run_id: str):
@@ -360,6 +1477,25 @@ def synchronized(method):
     return wrapped
 
 
+class _RepairController:
+    """One uninterrupted controller operation; never deserialized from a run."""
+    def __init__(self, store, scheduler, mode):
+        self.store, self.scheduler, self.mode = store, scheduler, copy.deepcopy(mode)
+        self.context = dict(unit_id=mode["unit_id"], attempt_id=mode["source_attempt_id"],
+                            registry=copy.deepcopy(store.state["options"]["verifier_registry"]),
+                            spec_sha256=mode["spec_sha256"], started_clock=mode["started_clock"])
+        self.observations = {}
+        self.record = None
+        self.closed = False
+        self.grant_record = None
+        self.allocation_started = False
+        self.allocation_record = None
+        self.dispatch = None
+        self.verification_context = None
+        self.verification_observations = {}
+        self.verification_section = None
+
+
 class Store:
     def __init__(self, root: Path, run_id: str):
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,79}", run_id):
@@ -378,16 +1514,550 @@ class Store:
         self._authorized_controllers = set()
         self._controller_token = uuid.uuid4().hex
         self._authorized_controllers.add(self._controller_token)
+        self._repair_write_failed = False
+        self._repair_controller = None
+        self._safe_qwen_identity_pending = None
+        self._safe_qwen_active_controller = None
+
+    @synchronized
+    def select_safe_qwen_recovery_identity(self, scheduler, unit_id):
+        """Explicit pre-Attempt-1 selection only; return data, never a capability.
+
+        The exclusive reservation precedes the WAL commit so partial selection
+        cannot be mistaken for an ordinary M0 torn tail. No _RepairController is
+        created, and no existing execution or authorization mode accepts this.
+        """
+        from work_unit_scheduler import WorkUnitScheduler
+        from supervision import _validated_store
+        from safe_executor_binding import validate_pinned
+        from terminal_run import recovery_worker_spec, validate_safe_qwen_unit_contract
+        from integration_shim import SafeQwenExecutor
+        import manager
+        _repair_require(type(scheduler) is WorkUnitScheduler and scheduler.store is self
+                        and type(unit_id) is str and type(scheduler.supervisor) is Supervisor
+                        and scheduler.supervisor.store is self and scheduler.clock is time.monotonic
+                        and not self._repair_write_failed and self._safe_qwen_identity_pending is None
+                        and not any(k in self.state for k in (_SAFE_QWEN_IDENTITY, "repair_recovery", "repair_authorizations"))
+                        and not (self.directory / _SAFE_QWEN_RESERVATION).exists())
+        _validated_store(self)
+        sup = scheduler.supervisor
+        _repair_require(sup.entered and not sup.closed and sup.failure is None and sup.thread is not None
+                        and sup.thread.is_alive() and sup.worker_started.is_set())
+        sup.require_idle()
+        sup.heartbeat()
+        live = self.state["supervision"]["controller"]
+        _repair_require(live["pid"] == os.getpid() and live["identity"] == winprocess.identity(os.getpid())
+                        and live["boot"] == winprocess.boot_identity())
+        executor = getattr(self, "_effective_work_unit_executor", None)
+        _repair_require(type(executor) is SafeQwenExecutor and scheduler.repo.store is self
+                        and scheduler.repo.root == executor.policy.root
+                        and scheduler.budgets == self.state["manager"]["budgets"]
+                        and scheduler.parent_scope == self.state["manager"]["scope"]
+                        and scheduler.verifier_registry == self.state["options"]["verifier_registry"])
+        cfg = self.state["options"]["config"]
+        validate_pinned(cfg, executor)
+        _repair_require(scheduler.repo.config == cfg)
+        manager.validate_repository(self, scheduler.repo)
+        _repair_require(environment.compare(self.state["environment"], current_fingerprint(self, executor=executor))["decision"]
+                        in ("MATCH", "INFORMATIONAL"))
+        unit = self.state["work_units"]["units"][unit_id]
+        worker = recovery_worker_spec(unit["spec"], cfg)
+        validate_safe_qwen_unit_contract(worker, cfg, executor, self)
+        started = scheduler.clock()
+        identity = dict(schema_version=1, kind="SAFEQWEN_IDENTITY_ONLY", identity_id=uuid.uuid4().hex,
+                        run_id=self.state["run_id"], unit_id=unit_id, repository=self.state["target_repository"],
+                        parent_spec_sha256=digest(unit["spec"]), worker_spec_sha256=digest(worker),
+                        scope_sha256=digest({"parent": unit["spec"]["scope"], "manager": self.state["manager"]["scope"],
+                                             "worker": cfg["safe_qwen_identity"]["scope"]}),
+                        registry_sha256=digest(self.state["options"]["verifier_registry"]), config_sha256=digest(cfg),
+                        model_pin_sha256=cfg["safe_qwen_identity"]["sha256"], environment_sha256=digest(self.state["environment"]),
+                        controller_session=_repair_session(self.state), budgets_sha256=digest(self.state["manager"]["budgets"]),
+                        baseline_fingerprint=snapshot(scheduler.repo)["fingerprint"], started_clock=started,
+                        task_deadline=started + scheduler.remaining_task_budget(started),
+                        unit_deadline=started + unit["spec"]["limits"]["timeout_seconds"], invocations=[])
+        for number in (1, 2):
+            identity["invocations"].append(dict(execution_id=digest([identity["identity_id"], identity["run_id"], unit_id, number,
+                                                                   identity["worker_spec_sha256"]]),
+                                               attempt_id=f"{unit_id}-attempt-{number}", attempt_number=number,
+                                               worker_spec=copy.deepcopy(worker), worker_spec_sha256=digest(worker)))
+        state = copy.deepcopy(self.state)
+        state.update(safe_qwen_recovery_identity=identity, revision=state["revision"] + 1, updated_at=now())
+        validate_state(state)
+        fields = dict(state=state, transition=None, safe_qwen_recovery_identity={"event": "identity_selected", "sha256": digest(identity)})
+        self._safe_qwen_identity_pending = ("state_committed", fields)
+        try:
+            self.exclusive_artifact(_SAFE_QWEN_RESERVATION, identity)
+            self.append("state_committed", **fields)
+            self.state = copy.deepcopy(state)
+            atomic_write(self.directory / "state.json", encoded(state) + b"\n")
+        except BaseException:
+            self._repair_write_failed = True
+            raise
+        finally:
+            self._safe_qwen_identity_pending = None
+        return copy.deepcopy(identity)
+
+    def _require_repair_controller(self, controller):
+        _repair_require(type(controller) is _RepairController and controller is self._repair_controller
+                        and controller.store is self and not controller.closed and not self._repair_write_failed)
+        if "repair_recovery" in self.state:
+            _repair_require(encoded(controller.mode) == encoded(self.state["repair_recovery"]))
+
+    @synchronized
+    def _begin_repair_recovery(self, scheduler, unit_id, *, allocate=False, offline_recipe=None, verify=False):
+        """Derive and persist opt-in before execution; selectors, never grant JSON."""
+        from work_unit_scheduler import WorkUnitScheduler
+        from supervision import _validated_store
+        _repair_require(type(scheduler) is WorkUnitScheduler and scheduler.store is self
+                        and isinstance(scheduler.supervisor, Supervisor) and scheduler.supervisor.store is self
+                        and self._repair_controller is None and "repair_recovery" not in self.state
+                        and "repair_authorizations" not in self.state and _SAFE_QWEN_IDENTITY not in self.state
+                        and "safe_qwen_active_recovery" not in self.state)
+        _repair_require(type(allocate) is bool)
+        _repair_require(type(verify) is bool and (not verify or offline_recipe is not None))
+        _validated_store(self)
+        scheduler.supervisor.heartbeat()
+        unit = self.state["work_units"]["units"][unit_id]
+        _repair_require(unit["status"] == "READY" and not unit["attempts"]
+                        and unit["spec"]["limits"]["max_attempts"] == 2)
+        controller = self.state["supervision"]["controller"]
+        _repair_require(controller["pid"] == os.getpid() and controller["identity"] == winprocess.identity(os.getpid())
+                        and controller["boot"] == winprocess.boot_identity())
+        started = scheduler.clock()
+        mode = dict(schema_version=1, mode="ACTIVE", recovery_id=uuid.uuid4().hex, run_id=self.state["run_id"],
+                    unit_id=unit_id, source_attempt_id=f"{unit_id}-attempt-1", spec_sha256=digest(unit["spec"]),
+                    registry_sha256=digest(self.state["options"]["verifier_registry"]),
+                    controller_session=_repair_session(self.state), budgets_sha256=digest(self.state["manager"]["budgets"]),
+                    environment_sha256=digest(self.state["environment"]), baseline_fingerprint=snapshot(scheduler.repo)["fingerprint"],
+                    started_clock=started, task_deadline=started + scheduler.remaining_task_budget(started))
+        if allocate:
+            mode.update(schema_version=2, operation="ALLOCATE_ONLY")
+        if offline_recipe is not None:
+            _repair_require(allocate)
+            from offline_scripted_executor import _source_identity
+            mode.update(schema_version=4 if verify else 3, operation="OFFLINE_VERIFY" if verify else "OFFLINE_DISPATCH", offline_recipe=copy.deepcopy(offline_recipe),
+                        offline_sources=_source_identity())
+        owner = _RepairController(self, scheduler, mode)
+        self._repair_controller = owner
+        state = copy.deepcopy(self.state)
+        state.update(repair_recovery=mode, revision=state["revision"] + 1, updated_at=now())
+        owner.record = ("state_committed", dict(state=state, transition=None,
+                        repair_recovery={"event": "repair_recovery_enabled", "recovery_id": mode["recovery_id"]}))
+        self._append_repair_controller_record(owner)
+        return owner
+
+    def _append_repair_controller_record(self, controller):
+        """Write only the internally derived pending record of this capability."""
+        self._require_repair_controller(controller)
+        event, fields = controller.record
+        try:
+            if "state" in fields:
+                validate_state(fields["state"])
+                from supervision import validate_invocations
+                validate_invocations(fields["state"], self.state, None)
+            self.append(event, **fields)
+            if "state" in fields:
+                self.state = copy.deepcopy(fields["state"])
+                atomic_write(self.directory / "state.json", encoded(self.state) + b"\n")
+        except BaseException:
+            self._repair_write_failed = True
+            controller.closed = True
+            raise
+        finally:
+            controller.record = None
+
+    def _repair_native_evidence(self, attempt_id, observations):
+        """One artifact/reference format for both trusted issuance controllers."""
+        evidence = {}
+        for vid, observation in observations.items():
+            binding = copy.deepcopy(observation["binding"])
+            refs = {}
+            for event, value in binding["wal"].items():
+                seq = value["sequence"] if type(value) is dict else value
+                ref = {k: self.get_record(seq)[k] for k in ("sequence", "sha256")}
+                _repair_require(type(value) is int or value == ref)
+                refs[event] = ref
+            binding["wal"] = refs
+            binding["evidence"] = self.artifact(
+                f"repair-evidence/{attempt_id}/{binding['invocation_id']}.json", observation["native"])
+            evidence[vid] = binding
+        return evidence
+
+    def _make_granted_authorization(self, unit, decision, authorization_id, evidence):
+        """Pure GRANTED v1 construction from already authenticated controller facts."""
+        attempt = unit["attempts"][0]
+        session, budget = _repair_context(self.state, unit, attempt)
+        source = self.records[-1]
+        _repair_require(source["event"] == "state_committed" and source["state"] == self.state)
+        grant = dict(schema_version=1, state="GRANTED", run_id=self.state["run_id"], unit_id=unit["unit_id"],
+                     source_attempt_id=attempt["attempt_id"], authorization_id=authorization_id,
+                     candidate_fingerprint=attempt["candidate_snapshot"]["fingerprint"], spec_sha256=digest(unit["spec"]),
+                     registry_sha256=digest(self.state["options"]["verifier_registry"]),
+                     source_wal={k: source[k] for k in ("sequence", "sha256")}, native_evidence=evidence,
+                     policy_b=dict(policy="B", eligible=True, decision="ALLOW", reason_code=decision.reason_code,
+                                   failed_verifiers=sorted(decision.details["failed_verifiers"])),
+                     budget=budget, recovery_session=session)
+        return grant
+
+    def _append_grant_record(self, controller, event, fields, *, ai=False):
+        if not ai:
+            controller.record = (event, fields)
+            return self._append_repair_controller_record(controller)
+        from safe_qwen_active_grant import require_owner
+        require_owner(self, controller)
+        _repair_require(controller.grant_writing and controller.grant_started and controller.pending is None)
+        controller.pending = (event, fields)
+        try:
+            if "state" in fields:
+                validate_state(fields["state"])
+                from supervision import validate_invocations
+                validate_invocations(fields["state"], self.state, None)
+            self.append(event, **fields)
+            if "state" in fields:
+                self.state = copy.deepcopy(fields["state"])
+                atomic_write(self.directory / "state.json", encoded(self.state) + b"\n")
+        except BaseException:
+            controller.persistence_failed()
+            raise
+        finally:
+            controller.pending = None
+
+    def _commit_granted_authorization(self, controller, grant, *, ai=False):
+        """The existing adjacent decision/GRANTED transaction; no consumption."""
+        policy = {k: grant[k] for k in ("schema_version", "run_id", "unit_id", "source_attempt_id",
+                                       "source_wal", "policy_b", "recovery_session")}
+        continuous = False
+        try:
+            self._append_grant_record(controller, _REPAIR_DECISION_EVENT, {"decision": policy}, ai=ai)
+            grant["policy_wal"] = {k: self.records[-1][k] for k in ("sequence", "sha256")}
+            state = copy.deepcopy(self.state)
+            state.update(repair_authorizations={grant["authorization_id"]: grant},
+                         revision=state["revision"] + 1, updated_at=now())
+            fields = dict(state=state, transition=None,
+                          repair_authorization={"event": _REPAIR_GRANT_EVENT, "authorization_id": grant["authorization_id"]})
+            preview = dict(sequence=len(self.records) + 1, time=now(), event="state_committed",
+                           previous=self.records[-1]["sha256"], **fields)
+            preview["sha256"] = digest(preview)
+            validate_state(state)
+            _validate_repair_history([*self.records, preview], self.read_evidence)
+            if ai:
+                _repair_require(not controller.cancel_event.is_set() and time.monotonic() < min(
+                    controller.identity[k] for k in ("deadline", "unit_deadline", "task_deadline")))
+            self._append_grant_record(controller, "state_committed", fields, ai=ai)
+            if ai and controller.allocation_selected:
+                controller.grant_record = copy.deepcopy(self.records[-1])
+                continuous = True
+            if not ai and controller.mode.get("operation") in {"ALLOCATE_ONLY", "OFFLINE_DISPATCH", "OFFLINE_VERIFY"}:
+                controller.grant_record = copy.deepcopy(self.records[-1])
+                continuous = True
+            return copy.deepcopy(grant)
+        except BaseException:
+            self._repair_write_failed = True
+            raise
+        finally:
+            controller.closed = not continuous
+
+    @synchronized
+    def _issue_repair_grant(self, controller):
+        """Existing offline issuance capability and semantics, unchanged."""
+        self._require_repair_controller(controller)
+        from supervision import _validated_store
+        _validated_store(self)
+        _repair_require("repair_authorizations" not in self.state)
+        unit = self.state["work_units"]["units"][controller.mode["unit_id"]]
+        attempt = unit["attempts"][0]
+        _repair_require(attempt["repair_observation"]["observations"] == controller.observations)
+        evidence = self._repair_native_evidence(attempt["attempt_id"], controller.observations)
+        decision = controller.scheduler._fresh_repair_classification(controller)
+        _repair_require(decision.is_allowed() and decision.reason_code == "ALLOW_VERIFIER_FAILURE")
+        grant = self._make_granted_authorization(unit, decision, "repair-" + controller.mode["recovery_id"], evidence)
+        _repair_require(grant["recovery_session"] == controller.mode["controller_session"])
+        return self._commit_granted_authorization(controller, grant)
+
+    @synchronized
+    def _issue_ai_repair_grant(self, controller):
+        """Preselected ACTIVE v4/v5 owner only; no payload or diagnostic input."""
+        from safe_qwen_active_grant import require_owner
+        from safe_qwen_active_eligibility import classify_for_grant, _guard
+        require_owner(self, controller)
+        _repair_require(not controller.grant_started and controller.pending is None)
+        controller.grant_started = True
+        try:
+            _repair_require("repair_authorizations" not in self.state)
+            decision = classify_for_grant(controller)
+            if not decision.is_allowed():
+                return None
+            _repair_require(decision.reason_code == "ALLOW_VERIFIER_FAILURE")
+            unit, _ = _guard(controller)
+            attempt = unit["attempts"][0]
+            _repair_require(attempt["outcome"] == "failed" and attempt["failure_classification"] == "verification_failed")
+            evidence = self._repair_native_evidence(attempt["attempt_id"], controller.data["verification"]["observations"])
+            _, budgets = _guard(controller)
+            _repair_require(all(value >= 1 for value in budgets.values()))
+            grant = self._make_granted_authorization(unit, decision, "repair-" + controller.identity["id"], evidence)
+            _repair_require(grant["recovery_session"] == controller.identity["session"])
+            controller.grant_writing = True
+            return self._commit_granted_authorization(controller, grant, ai=True)
+        finally:
+            controller.closed = not (controller.allocation_selected and controller.grant_record is not None
+                                     and not self._repair_write_failed)
+            controller.grant_writing = False
+
+    def _commit_repair_allocation(self, controller, grant, consumption, *, ai=False):
+        consumed = copy.deepcopy(grant)
+        consumed.update(schema_version=2, state="CONSUMED", consumption=consumption)
+        state = copy.deepcopy(self.state)
+        state.update(repair_authorizations={grant["authorization_id"]: consumed},
+                     work_units=_allocated_repair_section(state["work_units"], grant, consumption),
+                     revision=state["revision"] + 1, updated_at=consumption["allocated_at"])
+        state["manager"]["runtime_seconds"] = consumption["task_runtime_seconds"]
+        self._append_grant_record(controller, "state_committed", dict(state=state, transition=None,
+            repair_authorization={"event": _REPAIR_CONSUME_EVENT, "authorization_id": grant["authorization_id"],
+                                  "attempt_id": consumption["attempt_id"]}), ai=ai)
+        return copy.deepcopy(consumed)
+
+    @synchronized
+    def _consume_ai_repair_grant(self, controller):
+        """Live preselected v5 owner only. Atomic allocation, no external effects."""
+        from safe_qwen_active_grant import require_allocation_owner, ai_binding
+        from safe_qwen_active_eligibility import classify_for_grant, _guard
+        require_allocation_owner(self, controller)
+        _repair_require(controller.grant_record is not None and not controller.allocation_started
+                        and controller.pending is None and controller.grant_started)
+        controller.allocation_started = True
+        continuous = False
+        try:
+            unit, budgets = _guard(controller)
+            _repair_require(self.records[-1] == controller.grant_record and all(v >= 1 for v in budgets.values()))
+            aid = "repair-" + controller.identity["id"]
+            _repair_require(set(self.state["repair_authorizations"]) == {aid})
+            grant = self.state["repair_authorizations"][aid]
+            _repair_require(grant["state"] == "GRANTED" and grant["schema_version"] == 1)
+            decision = classify_for_grant(controller)
+            _repair_require(decision.is_allowed() and decision.reason_code == "ALLOW_VERIFIER_FAILURE")
+            unit, budgets = _guard(controller)
+            # The live guard checks the exact ACTIVE WAL-sealed candidate,
+            # raw filesystem, initial Git/index identity and frozen scope. The
+            # legacy Manager resume projection does not represent ACTIVE edits.
+            check_previous_command(self.state)
+            _repair_require(controller.scheduler.clock is time.monotonic
+                            and controller.gateway.active_role is None and controller.gateway.active_model_child_id is None
+                            and self.records[-1] == controller.grant_record and all(v >= 1 for v in budgets.values()))
+            clock = controller.scheduler.clock()
+            runtime = controller.scheduler.runtime(clock)
+            i = controller.identity
+            _repair_require(runtime >= self.state["manager"]["runtime_seconds"]
+                            and min(i["deadline"], i["task_deadline"], grant["budget"]["unit_deadline"]) - clock >= 1)
+            consumption = dict(schema_version=2, attempt_id=i["unit_id"] + "-attempt-2",
+                grant_wal={k: controller.grant_record[k] for k in ("sequence", "sha256")}, granted_sha256=digest(grant),
+                allocated_at=now(), checked_clock=clock, task_runtime_seconds=runtime,
+                unit_elapsed_seconds=clock - i["started_clock"], task_deadline=i["task_deadline"],
+                unit_deadline=grant["budget"]["unit_deadline"], controller_session=_repair_session(self.state),
+                ai_binding=ai_binding(controller.data))
+            controller.grant_writing = True
+            consumed = self._commit_repair_allocation(controller, grant, consumption, ai=True)
+            if controller.dispatch_selected:
+                from safe_qwen_active_dispatch import require_owner
+                require_owner(controller)
+                controller.allocation_record = copy.deepcopy(self.records[-1])
+                continuous = True
+            return consumed
+        except BaseException:
+            controller.persistence_failed()
+            raise
+        finally:
+            controller.closed = not continuous
+            controller.grant_writing = False
+
+    @synchronized
+    def _consume_repair_grant(self, controller):
+        """One continuous operation: atomic consumption/allocation, never launch.
+
+        No grant selector or JSON payload is accepted. Issuance-only sessions
+        close before this method, and loaded sessions never acquire a capability.
+        """
+        self._require_repair_controller(controller)
+        _repair_require(controller.mode.get("operation") in {"ALLOCATE_ONLY", "OFFLINE_DISPATCH", "OFFLINE_VERIFY"}
+                        and controller.grant_record is not None and not controller.allocation_started)
+        controller.allocation_started = True
+        continuous = False
+        try:
+            from supervision import _validated_store
+            _validated_store(self)
+            _repair_require(encoded(self.records[-1]) == encoded(controller.grant_record))
+            aid = "repair-" + controller.mode["recovery_id"]
+            _repair_require(set(self.state["repair_authorizations"]) == {aid})
+            grant = self.state["repair_authorizations"][aid]
+            _repair_require(grant["state"] == "GRANTED" and grant["schema_version"] == 1)
+            unit = self.state["work_units"]["units"][grant["unit_id"]]
+            _repair_require(unit["attempts"][0]["repair_observation"]["observations"] == controller.observations)
+            decision = controller.scheduler._fresh_repair_classification(controller)
+            _repair_require(decision.is_allowed() and decision.reason_code == "ALLOW_VERIFIER_FAILURE")
+            self._require_repair_controller(controller)
+            _validated_store(self)
+            _repair_require(encoded(self.records[-1]) == encoded(controller.grant_record))
+            clock = controller.scheduler.clock()
+            runtime = controller.scheduler.runtime(clock)
+            _repair_require(runtime >= self.state["manager"]["runtime_seconds"]
+                            and min(controller.mode["task_deadline"], grant["budget"]["unit_deadline"]) - clock >= 1)
+            c = dict(schema_version=1, attempt_id=grant["unit_id"] + "-attempt-2",
+                     grant_wal={k: controller.grant_record[k] for k in ("sequence", "sha256")},
+                     granted_sha256=digest(grant), allocated_at=now(), checked_clock=clock,
+                     task_runtime_seconds=runtime, unit_elapsed_seconds=clock - controller.mode["started_clock"],
+                     task_deadline=controller.mode["task_deadline"], unit_deadline=grant["budget"]["unit_deadline"],
+                     controller_session=_repair_session(self.state))
+            consumed = self._commit_repair_allocation(controller, grant, c)
+            if controller.mode.get("operation") in {"OFFLINE_DISPATCH", "OFFLINE_VERIFY"}:
+                controller.allocation_record = copy.deepcopy(self.records[-1])
+                continuous = True
+            return copy.deepcopy(consumed)
+        finally:
+            controller.closed = not continuous
+
+    @synchronized
+    def _advance_repair_dispatch(self, controller):
+        """Only a registered live native adapter supplies lifecycle facts, never JSON."""
+        from offline_scripted_executor import _ControllerDispatch
+        self._require_repair_controller(controller)
+        dispatch = controller.dispatch
+        _repair_require(type(dispatch) is _ControllerDispatch and dispatch.controller is controller)
+        try:
+            state = dispatch.next_state()  # Reads retained native handles / internal observation, not returned data.
+            controller.record = ("state_committed", dict(state=state, transition=None,
+                repair_dispatch={"event": "repair_dispatch_" + state["repair_dispatch"]["phase"].lower(),
+                                 "dispatch_id": state["repair_dispatch"]["dispatch_id"]}))
+            self._append_repair_controller_record(controller)
+            dispatch.last_record = copy.deepcopy(self.records[-1])
+        except BaseException:
+            controller.closed = True
+            raise
+
+    @synchronized
+    def _persist_repair_verification(self, controller):
+        """Persist only the live qualification sequence, never caller evidence."""
+        self._require_repair_controller(controller)
+        try:
+            from supervision import _validated_store
+            _validated_store(self)
+            _repair_require(controller.mode.get("operation") == "OFFLINE_VERIFY"
+                            and controller.verification_context is not None and controller.dispatch is not None
+                            and controller.dispatch.last_record is not None)
+            section = copy.deepcopy(controller.verification_section)
+            unit = section["units"][controller.mode["unit_id"]]
+            att = unit["attempts"][1]
+            obs = att["repair_observation"]
+            _repair_require(obs["observations"] == controller.verification_observations)
+            clock = controller.scheduler.clock()
+            stamp = now()
+            unit["updated_at"] = stamp
+            if att["completed_at"] is not None:
+                att["completed_at"] = stamp
+                att["timeout_info"] = {"elapsed_seconds": clock - att["started_at_clock"]}
+                grant = self.state["repair_authorizations"][self.state["repair_dispatch"]["authorization_id"]]
+                if clock >= min(controller.mode["task_deadline"], grant["budget"]["unit_deadline"]):
+                    att.update(outcome="timeout", failure_classification="verifier_timeout")
+                    unit["status"] = "UNIT_FAILED"
+            import work_units
+            work_units.seal_unit_state(unit)
+            work_units._reseal_section(section)
+            old = self.state.get("repair_verification")
+            if old is None:
+                controller.scheduler._guard_repair_verification(controller)
+                d = self.state["repair_dispatch"]
+                v = dict(schema_version=1, run_id=self.state["run_id"], unit_id=unit["unit_id"],
+                         attempt_id=att["attempt_id"], dispatch_id=d["dispatch_id"],
+                         dispatch_wal={k: controller.dispatch.last_record[k] for k in ("sequence", "sha256")},
+                         dispatch_evidence=copy.deepcopy(d["evidence"]), controller_session=controller.mode["controller_session"],
+                         candidate_fingerprint=obs["candidate_snapshot"]["fingerprint"],
+                         candidate_fs_sha256=digest(obs["candidate_fs_snapshot"]),
+                         tree_snapshot=copy.deepcopy(controller.verification_context["tree_snapshot"]),
+                         tree_sha256=controller.dispatch.evidence["after_snapshot_sha256"])
+            else:
+                v = copy.deepcopy(old)
+            v.update(phase="COMPLETE" if att["completed_at"] is not None else obs["phase"],
+                     checked_clock=clock, task_runtime_seconds=controller.scheduler.runtime(clock),
+                     updated_at=stamp, attempt_sha256=digest(att))
+            state = copy.deepcopy(self.state)
+            state.update(work_units=section, repair_verification=v, revision=state["revision"] + 1, updated_at=stamp)
+            state["manager"]["runtime_seconds"] = v["task_runtime_seconds"]
+            controller.record = ("state_committed", dict(state=state, transition=None,
+                repair_verification={"event": "repair_verification_" + v["phase"].lower(), "dispatch_id": v["dispatch_id"]}))
+            self._append_repair_controller_record(controller)
+        except BaseException:
+            controller.closed = True
+            raise
 
     @synchronized
     def append(self, event, **fields):
+        if self._repair_write_failed:
+            raise DurableError("Uncertain repair history write; reload required")
+        owner = self._repair_controller
+        owned = (type(owner) is _RepairController and not owner.closed and owner.record is not None
+                 and encoded(owner.record) == encoded((event, fields)))
+        identity_owned = (self._safe_qwen_identity_pending is not None
+                          and encoded(self._safe_qwen_identity_pending) == encoded((event, fields)))
+        from safe_qwen_active_recovery import KEY as active_key, MARKER as active_marker, RESERVATION as active_reservation, owns_record, validate_history as validate_active_history
+        active_owned = owns_record(self, event, fields)
+        repair_owned = owned
+        if active_owned and getattr(self._safe_qwen_active_controller, "grant_writing", False):
+            from safe_qwen_active_grant import owns_record as owns_ai_grant_record
+            repair_owned = owns_ai_grant_record(self, event, fields)
+        if (active_key in fields or active_marker in fields) and not active_owned:
+            raise DurableError("ACTIVE Attempt 1 events require the live controller")
+        if (_SAFE_QWEN_IDENTITY in fields or (type(event) is str and event.startswith("safe_qwen_recovery_"))) and not identity_owned:
+            raise DurableError("Recovery identity can only be derived by the controller selection operation")
+        if ((type(event) is str and event.startswith("repair_")) or "repair_authorization" in fields
+                or "repair_recovery" in fields or "repair_dispatch" in fields or "repair_verification" in fields) and not repair_owned:
+            raise DurableError("Repair authorization issuance/consumption is not enabled")
+        transition = fields.get("transition")
+        transition_event = transition.get("event") if type(transition) is dict else None
+        if type(transition_event) is str and transition_event.startswith("repair_"):
+            raise DurableError("Repair lifecycle transitions are not enabled")
+        if self.state and (active_key in self.state or _SAFE_QWEN_IDENTITY in self.state or "repair_authorizations" in self.state or "repair_recovery" in self.state):
+            if self._repair_write_failed:
+                raise DurableError("Uncertain repair history write; reload required")
+            from supervision import _validated_store
+            if not owned and not identity_owned and not active_owned:
+                _validated_store(self)
+        if event == "state_committed":
+            prior = next((r["state"] for r in reversed(self.records) if r["event"] == event), {})
+            proposed = fields.get("state", {})
+            active_controller = getattr(self, "_safe_qwen_active_controller", None)
+            if active_controller is not None and not active_owned:
+                active_controller.guard_state_commit(proposed, fields.get("transition"))
+            if not active_owned and encoded(proposed.get(active_key)) != encoded(prior.get(active_key)):
+                raise DurableError("Ordinary append cannot create or change ACTIVE recovery")
+            if not identity_owned and encoded(proposed.get(_SAFE_QWEN_IDENTITY)) != encoded(prior.get(_SAFE_QWEN_IDENTITY)):
+                raise DurableError("Ordinary WAL append cannot select, change or remove recovery identity")
+            validate_safe_qwen_recovery_identity(proposed)
+            if not repair_owned and any(encoded(proposed.get(key)) != encoded(prior.get(key))
+                                 for key in ("repair_authorizations", "repair_recovery", "repair_dispatch", "repair_verification")):
+                raise DurableError("Ordinary WAL append cannot issue, change or remove repair authorization")
+            validate_repair_authorizations(proposed)
         record = {"sequence": len(self.records) + 1, "time": now(), "event": event,
                   "previous": self.records[-1]["sha256"] if self.records else None, **fields}
         record["sha256"] = digest(record)
-        with (self.directory / "events.jsonl").open("ab") as stream:
-            stream.write(encoded(record) + b"\n")
-            stream.flush()
-            os.fsync(stream.fileno())
+        repair_state = fields.get("state", self.state) or {}
+        if active_key in repair_state or active_marker in fields or (self.directory / active_reservation).exists():
+            validate_active_history([*self.records, record], self.read_evidence,
+                                    reservation_exists=(self.directory / active_reservation).exists())
+        if (_SAFE_QWEN_IDENTITY in repair_state or _SAFE_QWEN_IDENTITY in fields
+                or (self.directory / _SAFE_QWEN_RESERVATION).exists()):
+            _validate_safe_qwen_identity_history([*self.records, record], self.read_evidence,
+                                                 reservation_exists=(self.directory / _SAFE_QWEN_RESERVATION).exists())
+        if (event != _REPAIR_DECISION_EVENT and
+                ("repair_recovery" in repair_state or "repair_authorizations" in repair_state)):
+            _validate_repair_history([*self.records, record], self.read_evidence)
+        try:
+            with (self.directory / "events.jsonl").open("ab") as stream:
+                stream.write(encoded(record) + b"\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+        except BaseException:
+            if active_owned or identity_owned or (self.state and (active_key in self.state or _SAFE_QWEN_IDENTITY in self.state
+                                                  or "repair_authorizations" in self.state or "repair_recovery" in self.state)):
+                self._repair_write_failed = True
+            raise
         self.records.append(record)
         return record["sequence"]
 
@@ -422,6 +2092,12 @@ class Store:
 
     @synchronized
     def commit(self, status=None, pre_write_guard=None, **fields):
+        if "safe_qwen_active_recovery" in fields or "safe_qwen_active_event" in fields:
+            raise DurableError("Ordinary commit cannot create ACTIVE recovery")
+        if _SAFE_QWEN_IDENTITY in fields:
+            raise DurableError("Ordinary commit cannot select recovery identity")
+        if any(key in fields for key in ("repair_authorizations", "repair_authorization", "repair_recovery", "repair_dispatch", "repair_verification")):
+            raise DurableError("Repair authorization issuance/consumption is not enabled")
         if self.is_terminal_accepted():
             raise DurableError("Terminal transaction already accepted; further state commits rejected")
         if "terminal_acceptance" in fields:
@@ -442,19 +2118,31 @@ class Store:
             if state.get("terminal_acceptance") is not None:
                 raise DurableError("Ordinary commit cannot inject terminal acceptance metadata in pre-write guard")
             validate_state(state)
+        from supervision import validate_invocations
+        validate_invocations(state, self.state, fields.get("supervision_event"))
         # The flushed WAL is the commit point. state.json is an atomic materialized view.
         rec_fields = {}
         if "reviewer_approval" in fields:
             rec_fields["reviewer_approval"] = copy.deepcopy(fields["reviewer_approval"])
-        seq = self.append(
-            "state_committed",
-            state=state,
-            transition=fields.get("supervision_event"),
-            **rec_fields,
-        )
+        try:
+            seq = self.append(
+                "state_committed",
+                state=state,
+                transition=fields.get("supervision_event"),
+                **rec_fields,
+            )
+        except BaseException:
+            if "safe_qwen_active_recovery" in state or _SAFE_QWEN_IDENTITY in state or "repair_recovery" in state or "repair_authorizations" in state:
+                self._repair_write_failed = True
+            raise
         committed_record = copy.deepcopy(self.records[seq - 1]) if isinstance(seq, int) and 1 <= seq <= len(self.records) else copy.deepcopy(self.records[-1])
         self.state = state
-        atomic_write(self.directory / "state.json", encoded(state) + b"\n")
+        try:
+            atomic_write(self.directory / "state.json", encoded(state) + b"\n")
+        except BaseException:
+            if "safe_qwen_active_recovery" in state or _SAFE_QWEN_IDENTITY in state or "repair_authorizations" in state or "repair_recovery" in state:
+                self._repair_write_failed = True
+            raise
         return copy.deepcopy(committed_record)
 
 
@@ -489,6 +2177,12 @@ class Store:
         authority token from ``register_controller_authority()``. An arbitrary
         caller-supplied string or dict is not sufficient authority.
         """
+        if ("safe_qwen_active_recovery" in self.state or "safe_qwen_active_recovery" in fields
+                or _SAFE_QWEN_IDENTITY in self.state or _SAFE_QWEN_IDENTITY in fields
+                or "repair_authorizations" in self.state or "repair_recovery" in self.state or "repair_authorizations" in fields
+                or "repair_recovery" in fields
+                or "repair_authorization" in fields):
+            raise DurableError("Dormant repair authorization cannot produce terminal acceptance")
         if self.is_terminal_accepted():
             raise DurableError("Terminal transaction already accepted; further state commits rejected")
         if not isinstance(acceptance_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,79}", acceptance_id):
@@ -850,6 +2544,8 @@ class Store:
                     if record["event"] == "state_committed":
                         state = record["state"]
                         validate_state(state)
+                        from supervision import validate_invocations
+                        validate_invocations(state, commits[-1] if commits else {}, record.get("transition"))
                         if state["revision"] != len(commits) + 1 or state["run_id"] != self.directory.name:
                             raise DurableError("Inconsistent durable state ledger")
                         commits.append(state)
@@ -859,6 +2555,12 @@ class Store:
                     raise DurableError("State and event evidence disagree")
 
                 candidate_state = commits[-1]
+                from safe_qwen_active_recovery import validate_history as validate_active_history, RESERVATION as active_reservation
+                validate_active_history(records, self.read_evidence, candidate_tail,
+                                        reservation_exists=(self.directory / active_reservation).exists())
+                _validate_safe_qwen_identity_history(records, self.read_evidence, candidate_tail,
+                                                     reservation_exists=(self.directory / _SAFE_QWEN_RESERVATION).exists())
+                _validate_repair_history(records, self.read_evidence, candidate_tail)
                 if (self.directory / "original-task.txt").read_bytes().decode("utf-8") != candidate_state["original_task"]:
                     raise DurableError("Original task artifact does not match state")
                 checkpoint = candidate_state["last_verified_checkpoint"]
@@ -955,6 +2657,10 @@ class Store:
             self.state = candidate_state
             self._terminal_accepted = candidate_terminal_accepted
             self._orphan_seals = orphan_seals
+            self._repair_write_failed = False
+            self._repair_controller = None
+            self._safe_qwen_identity_pending = None
+            self._safe_qwen_active_controller = None
 
             return copy.deepcopy(self.state)
 

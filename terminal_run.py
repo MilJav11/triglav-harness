@@ -135,8 +135,38 @@ def fixed_two_units(task1, vids1, task2, vids2, cfg, worker, *, id1="unit-1-mult
     return [unit1, unit2]
 
 
+def recovery_worker_spec(parent_spec, cfg):
+    """Pure identity projection, never registration or permission to execute.
+
+    One fixed parent ledger owns both future invocations. Their specification
+    remains the ordinary single-attempt specification; only the envelope will
+    distinguish logical attempts. Multi-unit recovery is outside this slice.
+    """
+    import work_units
+    work_units.validate_unit_spec(parent_spec)
+    if cfg.get("multi_work_unit") or parent_spec["limits"]["max_attempts"] != 2:
+        raise ValueError("Recovery identity requires one fixed two-attempt parent")
+    pin = cfg["safe_qwen_identity"]["scope"]
+    worker = SimpleNamespace(policy=SimpleNamespace(**pin))
+    spec = copy.deepcopy(parent_spec)
+    spec["limits"]["max_attempts"] = 1
+    expected = fixed_unit(spec["objective"], cfg, worker, spec["verifier_ids"])
+    comparable = copy.deepcopy(spec)
+    # Ordinary SafeQwen scope validation is insensitive to path ordering.
+    # Preserve the actual frozen specification/digest in the returned projection.
+    for key in ("allowed_paths", "forbidden_paths"):
+        comparable["scope"][key] = sorted(comparable["scope"][key])
+        expected["scope"][key] = sorted(expected["scope"][key])
+    if comparable != expected:
+        raise ValueError("Recovery parent differs from fixed SafeQwen worker contract")
+    work_units.validate_unit_spec(spec)
+    return spec
+
+
 def validate_safe_qwen_unit_contract(unit_spec, cfg, worker, store=None):
     from manager import ExecutorError
+    if store is not None and any(k in store.state for k in ("safe_qwen_recovery_identity", "safe_qwen_active_recovery")):
+        raise ExecutorError("Identity-only recovery cannot execute a worker", "CONTRACT_MISMATCH")
     if not cfg.get("multi_work_unit"):
         expected = fixed_unit(unit_spec.get("objective"), cfg, worker, unit_spec.get("verifier_ids"))
         if (unit_spec.get("unit_id") != expected["unit_id"] or unit_spec.get("mode") != expected["mode"]

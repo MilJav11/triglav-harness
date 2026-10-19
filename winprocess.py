@@ -74,8 +74,8 @@ def identity(pid):
 
 
 class OwnedJob:
-    """Broker holds the only long-lived handle; broker death kills its descendants."""
-    def __init__(self, name):
+    """Owner death kills Job members; the legacy broker also joins its own Job."""
+    def __init__(self, name, *, assign_current=True):
         if os.name != "nt":
             raise RuntimeError("Durable verifier containment currently requires Windows")
         class Basic(C.Structure):
@@ -99,6 +99,8 @@ class OwnedJob:
         if not self.k.SetInformationJobObject(self.handle, 9, C.byref(info), C.sizeof(info)):
             self.k.CloseHandle(self.handle)
             raise C.WinError(C.get_last_error())
+        if not assign_current:
+            return  # Opt-in controller owns this job, but must never join it.
         proc = self.k.OpenProcess(0x101, False, os.getpid())
         try:
             if not proc or not self.k.AssignProcessToJobObject(self.handle, proc):
@@ -109,8 +111,184 @@ class OwnedJob:
                 self.k.CloseHandle(proc)
 
     def close(self):
-        # Caller is a member: successful close terminates this broker too.
+        # The legacy broker is a member, so successful close terminates it too.
         self.k.CloseHandle(self.handle)
+
+
+class _StartupInfoW(C.Structure):
+    _fields_ = [("cb", W.DWORD), ("lpReserved", W.LPWSTR), ("lpDesktop", W.LPWSTR),
+                ("lpTitle", W.LPWSTR), ("dwX", W.DWORD), ("dwY", W.DWORD),
+                ("dwXSize", W.DWORD), ("dwYSize", W.DWORD), ("dwXCountChars", W.DWORD),
+                ("dwYCountChars", W.DWORD), ("dwFillAttribute", W.DWORD), ("dwFlags", W.DWORD),
+                ("wShowWindow", W.WORD), ("cbReserved2", W.WORD),
+                ("lpReserved2", C.POINTER(W.BYTE)), ("hStdInput", W.HANDLE),
+                ("hStdOutput", W.HANDLE), ("hStdError", W.HANDLE)]
+
+
+class _StartupInfoExW(C.Structure):
+    _fields_ = [("StartupInfo", _StartupInfoW), ("lpAttributeList", C.c_void_p)]
+
+
+class _ProcessInformation(C.Structure):
+    _fields_ = [("hProcess", W.HANDLE), ("hThread", W.HANDLE),
+                ("dwProcessId", W.DWORD), ("dwThreadId", W.DWORD)]
+
+
+_PROC_THREAD_ATTRIBUTE_JOB_LIST = 0x0002000d
+_PROC_THREAD_ATTRIBUTE_HANDLE_LIST = 0x00020002
+_EXTENDED_STARTUPINFO_PRESENT = 0x00080000
+
+
+def _create_verifier_in_job(k, command, cwd, inherited, job_handle):
+    """Create suspended in the Job: never return a child awaiting assignment.
+
+    CPython 3.12's _winapi wrapper only supports HANDLE_LIST, so use the
+    Windows STARTUPINFOEX contract directly for JOB_LIST as well. No fallback.
+    """
+    import subprocess
+    k.InitializeProcThreadAttributeList.argtypes = [C.c_void_p, W.DWORD, W.DWORD, C.POINTER(C.c_size_t)]
+    k.InitializeProcThreadAttributeList.restype = W.BOOL
+    k.UpdateProcThreadAttribute.argtypes = [C.c_void_p, W.DWORD, C.c_size_t, C.c_void_p,
+                                          C.c_size_t, C.c_void_p, C.POINTER(C.c_size_t)]
+    k.UpdateProcThreadAttribute.restype = W.BOOL
+    k.DeleteProcThreadAttributeList.argtypes, k.DeleteProcThreadAttributeList.restype = [C.c_void_p], None
+    k.CreateProcessW.argtypes = [W.LPCWSTR, W.LPWSTR, C.c_void_p, C.c_void_p, W.BOOL,
+                                W.DWORD, C.c_void_p, W.LPCWSTR, C.POINTER(_StartupInfoW),
+                                C.POINTER(_ProcessInformation)]
+    k.CreateProcessW.restype = W.BOOL
+    size = C.c_size_t()
+    C.set_last_error(0)
+    if (k.InitializeProcThreadAttributeList(None, 2, 0, C.byref(size)) or
+            C.get_last_error() != 122 or not size.value):  # ERROR_INSUFFICIENT_BUFFER expected.
+        raise RuntimeError("Cannot size creation-time verifier attributes")
+    attributes = C.create_string_buffer(size.value)
+    initialized = False
+    try:
+        if not k.InitializeProcThreadAttributeList(attributes, 2, 0, C.byref(size)):
+            raise C.WinError(C.get_last_error())
+        initialized = True
+        jobs = (W.HANDLE * 1)(job_handle)
+        handles = (W.HANDLE * len(inherited))(*inherited)
+        # Attribute values and buffers remain alive through creation and deletion.
+        for attribute, value in ((_PROC_THREAD_ATTRIBUTE_JOB_LIST, jobs),
+                                 (_PROC_THREAD_ATTRIBUTE_HANDLE_LIST, handles)):
+            if not k.UpdateProcThreadAttribute(attributes, 0, attribute, C.byref(value),
+                                               C.sizeof(value), None, None):
+                raise C.WinError(C.get_last_error())
+        startup = _StartupInfoExW()
+        startup.StartupInfo.cb = C.sizeof(startup)
+        startup.StartupInfo.dwFlags = 0x100  # STARTF_USESTDHANDLES
+        startup.StartupInfo.hStdInput, startup.StartupInfo.hStdOutput, startup.StartupInfo.hStdError = inherited
+        startup.lpAttributeList = C.addressof(attributes)
+        information = _ProcessInformation()
+        command_line = C.create_unicode_buffer(subprocess.list2cmdline(command))
+        if not k.CreateProcessW(str(Path(command[0]).resolve()), command_line, None, None, True,
+                                _EXTENDED_STARTUPINFO_PRESENT | 0x00000004 | 0x08000000,
+                                None, str(cwd), C.byref(startup.StartupInfo), C.byref(information)):
+            raise C.WinError(C.get_last_error())
+        return information.hProcess, information.hThread, information.dwProcessId
+    finally:
+        if initialized:
+            k.DeleteProcThreadAttributeList(attributes)
+
+
+class ControllerVerifier:
+    """Direct creation provenance: retain process/thread/job handles before execution.
+
+    No PID attachment or worker receipt is involved. This is lifecycle containment,
+    not an isolation boundary against hostile processes running as the same user.
+    """
+    def __init__(self, job_name):
+        self.job = OwnedJob(job_name, assign_current=False)
+        self.k = self.job.k
+        self.process = self.thread = None
+        self.pid = self.identity = None
+        self.k.ResumeThread.argtypes, self.k.ResumeThread.restype = [W.HANDLE], W.DWORD
+        self.k.GetExitCodeProcess.argtypes = [W.HANDLE, C.POINTER(W.DWORD)]
+
+    def launch(self, command, cwd, streams):
+        import _winapi
+        import msvcrt
+        if self.process is not None:
+            raise RuntimeError("Verifier process already created")
+        if (not isinstance(command, list) or not command or
+                any(not isinstance(arg, str) or "\0" in arg for arg in command) or
+                not Path(command[0]).is_absolute() or len(streams) != 3):
+            raise ValueError("Native verifier requires absolute executable, argv and three standard streams")
+        # Explicit handle list: never inherit the job/process/thread handles.
+        inherited = []
+        try:
+            try:
+                current = _winapi.GetCurrentProcess()
+                for stream in streams:
+                    inherited.append(_winapi.DuplicateHandle(
+                        current, msvcrt.get_osfhandle(stream.fileno()), current,
+                        0, True, _winapi.DUPLICATE_SAME_ACCESS))
+                self.process, self.thread, self.pid = _create_verifier_in_job(
+                    self.k, command, cwd, inherited, self.job.handle)
+            finally:
+                for handle in inherited:
+                    _winapi.CloseHandle(handle)
+            self.identity = _handle_identity(self.k, self.process)
+            if (self.identity is None or self.identity["executable"] !=
+                    os.path.normcase(str(Path(command[0]).resolve()))):
+                raise RuntimeError("Created verifier executable identity mismatch")
+            self.verify(self.identity)
+        except BaseException:
+            if self.process is not None:
+                _winapi.TerminateProcess(self.process, 137)
+                _winapi.WaitForSingleObject(self.process, 10000)
+            raise
+
+    def verify(self, expected_identity):
+        member = W.BOOL()
+        if (_handle_identity(self.k, self.process) != expected_identity
+                or not self.k.IsProcessInJob(self.process, self.job.handle, C.byref(member))
+                or not member.value):
+            raise RuntimeError("Retained verifier identity/job membership mismatch")
+
+    def resume(self, expected_identity):
+        self.verify(expected_identity)
+        previous = self.k.ResumeThread(self.thread)
+        if previous != 1:
+            raise RuntimeError("Verifier primary thread was not suspended exactly once")
+
+    def wait(self, timeout):
+        status = self.k.WaitForSingleObject(self.process, max(0, min(int(timeout * 1000), 0xfffffffe)))
+        if status == 258:
+            return None
+        if status != 0:
+            raise RuntimeError("Native verifier wait failed")
+        code = W.DWORD()
+        if not self.k.GetExitCodeProcess(self.process, C.byref(code)):
+            raise C.WinError(C.get_last_error())
+        return code.value  # Includes 259: a signaled handle distinguishes STILL_ACTIVE.
+
+    def terminate_job(self):
+        if not self.k.TerminateJobObject(self.job.handle, 137):
+            raise C.WinError(C.get_last_error())
+
+    def drain(self, timeout=10):
+        _wait_job_empty(self.k, self.job.handle, timeout)
+
+    def close(self):
+        # KILL_ON_JOB_CLOSE also covers exceptions and controller death.
+        import _winapi
+        try:
+            if self.process is not None and self.wait(0) is None:
+                # Also covers an exception before suspended-process Job assignment.
+                _winapi.TerminateProcess(self.process, 137)
+                if _winapi.WaitForSingleObject(self.process, 10000) != 0:
+                    raise RuntimeError("Verifier handle did not signal during close")
+        finally:
+            if self.job is not None:
+                self.job.close()
+                self.job = None
+            for name in ("thread", "process"):
+                handle = getattr(self, name)
+                if handle is not None:
+                    self.k.CloseHandle(handle)
+                    setattr(self, name, None)
 
 
 def terminate_owned_job(record, boot=boot_identity):
