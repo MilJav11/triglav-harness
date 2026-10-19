@@ -3331,7 +3331,7 @@
     "tests/test_safe_qwen_active_allocation.py": "f0559c2d675decb82f9e0d0d81f98ceec22676619bf6a4250cd4d16d1b380e34",
     "tests/test_safe_qwen_active_dispatch.py": "5213b363406a799ee6e911b9a81f6fe1849732c9c7b2af825523d8e17bddaebd",
     "tests/test_safe_qwen_active_dispatch_crash.py": "55e4c35aa77b606e6fda46bdb7aff6cc5d13204685864b0409bf389da7aaf230",
-    "tests/test_safe_qwen_active_eligibility.py": "1bb8e7466a9121a6391ac4ecbd47b0050ba9dab86e7893ee1ccb3820eadfc394",
+    "tests/test_safe_qwen_active_eligibility.py": "ca3942c7922d5a227713414e6264a5de1c244a9eb10cd0530cc1f22b57bf633b",
     "tests/test_safe_qwen_active_first.py": "f05a2990394a877278d0b6cc464273dd88b93f2302db810b512f3b1e3017d333",
     "tests/test_safe_qwen_active_grant.py": "b3df034dbded421182c4c8929f2f8b7429884c80586367b6f6d68f825332868d",
     "tests/test_safe_qwen_active_second_verification.py": "07b6d48c42274a6613b93e30cd6c821d215eac4fb1e33823294e0af84aa82f14",

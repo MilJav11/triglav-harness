@@ -217,24 +217,44 @@ class ActiveEligibilityTests(unittest.TestCase):
 
     def test_swallowed_classifier_wal_error_never_returns_diagnostic(self):
         self.fail_first()
+        # Use the fixture's already-frozen shared budget, not the API's shorter
+        # default. A legitimate timeout before classification cannot inject WAL.
+        budget = self.cfg["timeout_seconds"]
+        self.assertEqual(budget, self.worker_spec["limits"]["timeout_seconds"])
         classify = policy.classify_retry_eligibility
         original = bridge.run
         persisted = []
+        reached, decisions = [], []
         def injected(owner):
             def reconcile():
+                reached.append("reconcile")
                 # Reproduce a Supervisor append which reaches disk but raises
                 # before state publication. The frozen classifier catches it.
                 append = self.store.append
                 def uncertain(event, **value):
+                    self.assertEqual(value["transition"]["event"], "controller_heartbeat")
                     result = append(event, **value)
                     persisted.append((self.store.directory / "events.jsonl").read_bytes())
+                    reached.append("persisted_then_raise")
                     raise OSError("Uncertain Supervisor write")
                 with patch.object(self.store, "append", side_effect=uncertain): self.sup.heartbeat()
             def swallowed(unit, **kwargs):
-                with patch.object(self.sup, "reconcile", side_effect=reconcile): return classify(unit, **kwargs)
+                # Require the intended verifier-failure path; a TIMEOUT/DENY
+                # before reconcile is not evidence of an injected WAL failure.
+                self.assertEqual(unit["attempts"][0]["outcome"], "failed")
+                self.assertEqual(unit["attempts"][0]["failure_classification"], "verification_failed")
+                with patch.object(self.sup, "reconcile", side_effect=reconcile):
+                    result = classify(unit, **kwargs)
+                decisions.append((result.decision, result.reason_code))
+                return result
             with patch.object(policy, "classify_retry_eligibility", side_effect=swallowed): return original(owner)
-        with patch.object(bridge, "run", side_effect=injected), self.assertRaises(durable.DurableError): self.diagnose()
+        with patch.object(bridge, "run", side_effect=injected), self.assertRaises(durable.DurableError):
+            self.diagnose(timeout_seconds=budget)
+        self.assertEqual(reached, ["reconcile", "persisted_then_raise"])
+        self.assertEqual(decisions, [("DENY", policy.DENY_PROCESS_NOT_IDLE)])
         self.assertTrue(self.store._repair_write_failed)
+        self.assertEqual((self.store.directory / "events.jsonl").read_bytes(), persisted[-1])
+        with self.assertRaises(durable.DurableError): self.sup.heartbeat()
         self.assertEqual((self.store.directory / "events.jsonl").read_bytes(), persisted[-1])
         self.assert_no_authority()
 
@@ -265,6 +285,10 @@ class ActiveEligibilityTests(unittest.TestCase):
     def test_actual_edit_failure_supplies_all_four_canonical_snapshots(self):
         import json
         import winprocess
+        # The real worker, verifier and classifier share this existing fixture
+        # envelope. Do not accidentally cap the whole path at the API default.
+        budget = self.cfg["timeout_seconds"]
+        self.assertEqual(budget, self.worker_spec["limits"]["timeout_seconds"])
         edit = json.loads(self.edit)
         edit["arguments"]["new_text"] = "return a + b"
         self.responses = [wire(json.dumps(edit)), wire(self.submit)]
@@ -272,7 +296,7 @@ class ActiveEligibilityTests(unittest.TestCase):
         launched = []
         def created(native, *args):
             result = launch(native, *args); launched.append(native.pid); return result
-        with patch.object(winprocess.ControllerVerifier, "launch", created): result = self.diagnose()
+        with patch.object(winprocess.ControllerVerifier, "launch", created): result = self.diagnose(timeout_seconds=budget)
         self.assertEqual(result["diagnostic"]["decision"]["decision"], "ALLOW", result["diagnostic"])
         d = result["active_recovery"]
         self.assertNotEqual(d["snapshot_before"], d["result"]["candidate"])
