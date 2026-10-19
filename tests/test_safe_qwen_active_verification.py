@@ -1,5 +1,7 @@
 """Native Windows qualification; real handles, inert model process, fake HTTP."""
 import copy
+from contextlib import ExitStack
+import math
 import os
 import json
 from pathlib import Path
@@ -20,15 +22,77 @@ from supervision import Supervisor
 import test_safe_qwen_active_first as first
 
 
+def _verification_diagnostic(data, observed, clock):
+    """Closed, bounded fields only; never stringify state, WAL or exceptions."""
+    def mapping(value): return value if type(value) is dict else {}
+    def number(value):
+        return round(value, 3) if type(value) in (int, float) and abs(value) <= 10**9 and math.isfinite(value) else None
+    def boolean(value): return value if type(value) is bool else None
+    def label(value, allowed): return value if type(value) is str and value in allowed else "unknown"
+    data, observed = mapping(data), mapping(observed)
+    identity = mapping(data.get("identity"))
+    result = mapping(data.get("result"))
+    cleanup = mapping(result.get("cleanup_proof"))
+    v = mapping(data.get("verification"))
+    native = mapping(mapping(mapping(v.get("observations")).get("check-1")).get("native"))
+    started, deadline, clock = number(identity.get("started_clock")), number(identity.get("deadline")), number(clock)
+    def remaining(name):
+        end = number(identity.get(name))
+        return number(end - clock) if end is not None and clock is not None else None
+    value = dict(schema_version=1, fixture_budget_seconds=number(observed.get("fixture_budget")),
+        shared_started_clock=started, shared_deadline=deadline,
+        shared_budget_seconds=number(deadline - started) if deadline is not None and started is not None else None,
+        remaining_shared_seconds=remaining("deadline"), remaining_unit_seconds=remaining("unit_deadline"),
+        remaining_task_seconds=remaining("task_deadline"),
+        worker_outcome=label(result.get("outcome"), {"executor_succeeded_unverified", "executor_failed_unverified"}),
+        worker_empty_job=boolean(cleanup.get("empty_job")), worker_exit_code=number(cleanup.get("exit_code")),
+        verification_phase=label(v.get("phase"), {"OBSERVING", "COMPLETE"}),
+        verification_outcome=label(v.get("outcome"), {"passed", "failed", "timeout"}),
+        verification_elapsed_seconds=number(v.get("elapsed_seconds")),
+        verifier_termination_basis=label(native.get("termination_basis"),
+            {"signaled_without_controller_termination", "controller_deadline", "controller_cancel"}),
+        verifier_cleanup=label(native.get("cleanup"), {"observed_empty"}),
+        guard_refused=boolean(observed.get("guard_refused")), guard_clock=number(observed.get("guard_clock")),
+        guard_observation_incomplete=boolean(observed.get("guard_observation_incomplete")),
+        guard_remaining_shared_seconds=number(observed.get("guard_remaining")),
+        guard_remaining_task_budget=number(observed.get("guard_task_budget")),
+        fault_event=label(observed.get("fault_event"), {"VERIFY_INTENT", "invocation_intent", "invocation_bound",
+            "invocation_release", "process_exit", "invocation_complete", "VERIFY_OBSERVATION", "VERIFY_COMPLETE"}),
+        fault_stage=label(observed.get("fault_stage"), {"before_append", "after_append"}),
+        fault_hits=number(observed.get("fault_hits")),
+        subsequent_writes_refused=boolean(observed.get("subsequent_writes_refused")),
+        fault_native_cleanup_verified=boolean(observed.get("fault_native_cleanup_verified")))
+    for name in ("verify_selected", "same_thread", "contract_matches", "worker_complete", "worker_succeeded",
+                 "worker_cleanup_present", "network_idle", "cancelled"):
+        value[name] = boolean(observed.get(name))
+    payload = json.dumps(value, sort_keys=True, allow_nan=False)
+    assert len(("VERIFICATION_DIAGNOSTIC " + payload).encode("utf-8")) <= 4096
+    return payload
+
+
 @unittest.skipUnless(os.name == "nt", "Native Windows Job/identity observations required")
 class ActiveVerificationTests(unittest.TestCase):
     stop_fixture = first.ActiveFirstTests.stop_fixture
     servers = first.ActiveFirstTests.servers
     close_supervisor = first.ActiveFirstTests.close_supervisor
     reload = first.ActiveFirstTests.reload
-    run_first = first.ActiveFirstTests.run_first
+
+    # One semantic/WAL scenario envelope: worker + up to two native verifiers
+    # (each still capped at 30s) + durable validation/cleanup margin. It is frozen
+    # BEFORE either ledger. Intentional deadline/death scenarios retain originals.
+    SCENARIO_BUDGET = 120
+    DEADLINE_SCENARIOS = frozenset({
+        "test_native_timeout_drains_verifier_and_descendant",
+        "test_actual_controller_death_during_native_verification_never_relaunches",
+        "test_cumulative_budget_exhausted_after_worker_prevents_verification",
+    })
 
     def setUp(self):
+        # Other test families borrow this setup; do not change their reviewed
+        # configuration, caller budgets or inert processes.
+        selected = type(self) is ActiveVerificationTests and self._testMethodName not in self.DEADLINE_SCENARIOS
+        self._verification_budget = self.SCENARIO_BUDGET if selected else None
+        self._verification_observed = {"guard_refused": False}
         create = manager.create_run
         def fixture(store, repo, *args, **kwargs):
             if self._testMethodName == "test_complete_sequence_observes_both_registered_verifiers":
@@ -43,7 +107,44 @@ class ActiveVerificationTests(unittest.TestCase):
                 kwargs["verifier_registry"] = copy.deepcopy(kwargs["verifier_registry"])
                 kwargs["verifier_registry"]["check-1"]["timeout_seconds"] = 8
             return create(store, repo, *args, **kwargs)
-        with patch("manager.create_run", side_effect=fixture): first.ActiveFirstTests.setUp(self)
+        with ExitStack() as stack:
+            if selected:
+                import test_safe_qwen_integration as integration
+                prepared = integration.IntegrationTests.prepared
+                def bounded(fixture, *args, **kwargs):
+                    fixture.cfg["timeout_seconds"] = self._verification_budget
+                    fixture.data["unit_timeout_seconds"] = self._verification_budget
+                    fixture.path.write_text(json.dumps(fixture.cfg))
+                    fixture.policy_path.write_text(json.dumps(fixture.data))
+                    return prepared(fixture, *args, **kwargs)
+                stack.enter_context(patch.object(integration.IntegrationTests, "prepared", bounded))
+            stack.enter_context(patch("manager.create_run", side_effect=fixture))
+            first.ActiveFirstTests.setUp(self)
+        if selected:
+            self.assertEqual(self.cfg["timeout_seconds"], self._verification_budget)
+            self.assertEqual(self.worker_spec["limits"]["timeout_seconds"], self._verification_budget)
+            import subprocess
+            popen = subprocess.Popen
+            def inert_server(argv, *args, **kwargs):
+                if type(argv) is list and argv and argv[-1] == "import time;time.sleep(60)":
+                    argv = [*argv[:-1], f"import time;time.sleep({self._verification_budget + 30})"]
+                return popen(argv, *args, **kwargs)
+            item = patch("subprocess.Popen", new=inert_server)
+            item.start(); self.addCleanup(item.stop)
+
+    def run_first(self, **kwargs):
+        if self._verification_budget is not None:
+            kwargs.setdefault("timeout_seconds", self._verification_budget)
+        try:
+            return first.ActiveFirstTests.run_first(self, **kwargs)
+        finally:
+            if type(self) is ActiveVerificationTests:
+                self.report_verification()
+
+    def report_verification(self, owner=None):
+        self._verification_observed["fixture_budget"] = self.cfg["timeout_seconds"]
+        data = owner.data if owner is not None else self.store.state.get(active.KEY)
+        print("VERIFICATION_DIAGNOSTIC " + _verification_diagnostic(data, self._verification_observed, time.monotonic()), flush=True)
 
     def prepare_timeout_fixture(self, repo):
         import subprocess
@@ -64,7 +165,35 @@ class ActiveVerificationTests(unittest.TestCase):
         self.timeout_fixture_prepared = True
 
     def run_verified(self, **kwargs):
-        return self.scheduler.verify_safe_qwen_recovery_first("safe-qwen-task", gateway=self.gateway, **kwargs)
+        if self._verification_budget is not None:
+            kwargs.setdefault("timeout_seconds", self._verification_budget)
+        guard, owners = verification.guard, []
+        def observed_guard(owner, *args):
+            if not owners: owners.append(owner)
+            try:
+                return guard(owner, *args)
+            except BaseException:
+                self._verification_observed["guard_refused"] = True
+                try:
+                    now = time.monotonic()
+                    self._verification_observed.update(guard_clock=now,
+                        guard_remaining=owner.identity["deadline"] - now,
+                        guard_task_budget=owner.scheduler.remaining_task_budget(),
+                        verify_selected=owner.verify_selected, same_thread=threading.get_ident() == owner.thread_id,
+                        contract_matches=owner.data["verification_contract"] == verification.contract(),
+                        worker_complete=owner.data["phase"] == "COMPLETE",
+                        worker_succeeded=owner.data["result"]["outcome"] == "executor_succeeded_unverified",
+                        worker_cleanup_present=owner.cleanup is not None, network_idle=owner.network_thread is None,
+                        cancelled=owner.cancel_event.is_set())
+                except BaseException:
+                    # Diagnostics must never replace the original guard error.
+                    self._verification_observed["guard_observation_incomplete"] = True
+                raise
+        try:
+            with patch.object(verification, "guard", new=observed_guard):
+                return self.scheduler.verify_safe_qwen_recovery_first("safe-qwen-task", gateway=self.gateway, **kwargs)
+        finally:
+            self.report_verification(owners[0] if owners else None)
 
     def test_first_native_pass_is_intermediate_only(self):
         data = self.run_verified()["active_recovery"]
@@ -137,7 +266,7 @@ class ActiveVerificationTests(unittest.TestCase):
         self.assertEqual(self.reload().state[active.KEY]["verification"], data["verification"])
 
     def test_complete_sequence_observes_both_registered_verifiers(self):
-        data = self.run_verified(timeout_seconds=60)["active_recovery"]
+        data = self.run_verified()["active_recovery"]
         self.assertEqual(set(data["verification"]["observations"]), {"check-1", "check-2"})
         self.assertEqual(data["verification"]["outcome"], "passed")
         self.assertEqual(data["verification"]["before"], data["verification"]["after"])
@@ -246,13 +375,19 @@ class ActiveVerificationTests(unittest.TestCase):
     def fail_boundary(self, event, *, before=False):
         append = self.store.append
         persisted = []
+        reached = []
         def fault(kind, **fields):
             marker = fields.get(active.MARKER) or fields.get("transition") or {}
             hit = marker.get("event") == event
-            if hit and before: raise OSError("Before required verification WAL")
+            if hit and before:
+                reached.append("before_append")
+                self._verification_observed.update(fault_event=event, fault_stage="before_append", fault_hits=len(reached))
+                raise OSError("Before required verification WAL")
             result = append(kind, **fields)
             if hit:
                 persisted.append((self.store.directory / "events.jsonl").read_bytes())
+                reached.append("after_append")
+                self._verification_observed.update(fault_event=event, fault_stage="after_append", fault_hits=len(reached))
                 raise OSError("After required verification WAL")
             return result
         pids = []
@@ -262,14 +397,21 @@ class ActiveVerificationTests(unittest.TestCase):
         with patch.object(self.store, "append", side_effect=fault), patch.object(winprocess.ControllerVerifier, "launch", created), \
                 self.assertRaises((OSError, adapter.AdapterError, RuntimeError)):
             self.run_verified()
+        self.assertEqual(reached, ["before_append" if before else "after_append"])
         self.assertTrue(self.store._repair_write_failed)
         for pid in pids: self.assertIsNone(winprocess.identity(pid))
         if persisted: self.assertEqual((self.store.directory / "events.jsonl").read_bytes(), persisted[-1])
+        frozen = (self.store.directory / "events.jsonl").read_bytes()
+        with self.assertRaises(durable.DurableError): self.store.append("after_uncertain_verification")
+        with self.assertRaises(durable.DurableError): self.sup.heartbeat()
+        self.assertTrue((self.store.directory / "events.jsonl").read_bytes() == frozen, "Refused writes changed WAL")
         loaded = self.reload()
         self.assertIsNone(loaded._safe_qwen_active_controller)
         self.assertEqual(len(loaded.state["work_units"]["units"]["safe-qwen-task"]["attempts"]), 1)
         self.assertNotIn("repair_authorizations", loaded.state)
         self.assertIsNone(loaded.state["last_verified_checkpoint"])
+        self._verification_observed.update(subsequent_writes_refused=True, fault_native_cleanup_verified=True)
+        self.report_verification()
         return loaded
 
     def test_crash_before_verification_intent(self): self.fail_boundary("VERIFY_INTENT", before=True)
@@ -403,7 +545,7 @@ class ActiveVerificationTests(unittest.TestCase):
                 self.assertGreater(count(), before)
                 samples.append(path)
             return original(gateway, method, path, *args, **kwargs)
-        with patch("harness.Gateway.request", new=request): self.run_first(timeout_seconds=60)
+        with patch("harness.Gateway.request", new=request): self.run_first()
         self.assertEqual(len(samples), 2)
         self.assertIsNone(self.sup.failure)
 
