@@ -26,6 +26,48 @@ class ManifestTests(unittest.TestCase):
 
     def test_real_source_discovery_and_pins_match(self):
         ci.load_manifest()
+        # Keep the exact qualification ID; extend its runner-boundary checks.
+        import asyncio
+        import threading
+        from unittest.mock import Mock
+        original = asyncio.events.new_event_loop
+        loop = Mock()
+        loop.is_closed.return_value = False
+        with patch.object(asyncio, "ProactorEventLoop", return_value=loop, create=True) as create:
+            with ci._prepared_asyncio_loop("unapproved-test"):
+                self.assertIs(asyncio.events.new_event_loop, original)
+            create.assert_not_called()
+            with patch.object(ci.os, "name", "posix"), ci._prepared_asyncio_loop(ci.ASYNC_SELF_PIPE_TEST):
+                self.assertIs(asyncio.events.new_event_loop, original)
+            create.assert_not_called()
+            with patch.object(ci.os, "name", "nt"), ci._prepared_asyncio_loop(ci.ASYNC_SELF_PIPE_TEST):
+                take = asyncio.events.new_event_loop
+                errors = []
+                def foreign():
+                    try: take()
+                    except ci.CoverageError: errors.append("denied")
+                thread = threading.Thread(target=foreign)
+                thread.start(); thread.join(2)
+                self.assertFalse(thread.is_alive())
+                self.assertEqual(errors, ["denied"])
+                self.assertIs(take(), loop)
+                with self.assertRaises(ci.CoverageError): take()
+                with self.assertRaises(RuntimeError): loop._proactor.connect(None, ("192.0.2.1", 443))
+                # Consuming the prepared object grants no network capability.
+                with ci._child_network_guard("closed-gateway"), ci.socket.socket() as sock:
+                    with self.assertRaises(RuntimeError): sock.connect(("127.0.0.1", 9))
+            self.assertIs(asyncio.events.new_event_loop, original)
+            with self.assertRaises(ci.CoverageError): take()
+            create.assert_called_once_with()
+            loop.close.assert_called_once_with()
+        # Unconsumed initialization fails closed and still releases the loop.
+        unused = Mock()
+        unused.is_closed.return_value = False
+        with patch.object(asyncio, "ProactorEventLoop", return_value=unused, create=True), \
+                patch.object(ci.os, "name", "nt"), self.assertRaises(ci.CoverageError):
+            with ci._prepared_asyncio_loop(ci.ASYNC_SELF_PIPE_TEST): pass
+        unused.close.assert_called_once_with()
+        self.assertIs(asyncio.events.new_event_loop, original)
 
     def test_duplicate_id_is_refused(self):
         group = self.manifest["groups"]["supplemental"]
@@ -226,6 +268,28 @@ class SummaryTests(unittest.TestCase):
     def test_false_recursive_or_os_isolation_claim_is_refused(self):
         for key in ("recursive_guards","os_network_isolation"):
             self.lifecycle[key] = True; self.refuse(); self.lifecycle[key] = False
+        import harness
+        gateway = harness.Gateway.__new__(harness.Gateway)
+        # A broken guard hits these sentinels, never a real network endpoint.
+        with patch.object(ci.socket.socket, "connect", side_effect=AssertionError("Network reached")) as wire, \
+                patch.object(ci.socket.socket, "connect_ex", side_effect=AssertionError("Network reached")) as wire_ex, \
+                patch.object(ci.socket, "create_connection", side_effect=AssertionError("Network reached")) as connect:
+            for profile in ("closed-gateway", "fake-http-gateway"):
+                with self.subTest(profile=profile), ci._child_network_guard(profile):
+                    for address in (("127.0.0.1", 9), ("::1", 9), ("192.0.2.1", 443)):
+                        with self.subTest(address=address), ci.socket.socket() as sock:
+                            with self.assertRaises(RuntimeError): sock.connect(address)
+                            with self.assertRaises(RuntimeError): sock.connect_ex(address)
+                        with self.assertRaises(RuntimeError): ci.socket.create_connection(address)
+                    with self.assertRaises(RuntimeError): gateway.request("GET", "/running")
+                    if profile == "closed-gateway":
+                        for name in ("switch", "unload", "running"):
+                            with self.assertRaises(RuntimeError): getattr(gateway, name)()
+            wire.assert_not_called()
+            wire_ex.assert_not_called()
+            connect.assert_not_called()
+        with self.assertRaises(ci.CoverageError):
+            with ci._child_network_guard("unapproved"): pass
 
     def test_nonfinite_or_negative_duration_is_refused(self):
         for value in (float("nan"),float("inf"),-1,True):

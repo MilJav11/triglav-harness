@@ -6,7 +6,7 @@ Dynamic fixture construction remains in its original test; no helper is rewritte
 The parent reuses one policy/hook. Per-test hooks die with the test interpreter.
 """
 import argparse
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 import hashlib
 import json
 import os
@@ -232,6 +232,65 @@ def offline_environment(temp):
     tempfile.tempdir = str(temp)
 
 
+ASYNC_SELF_PIPE_TEST = ("test_unittest_verifier.TestUnittestVerifierAdapter."
+                        "test_async_teardown_failure_returns_execution_error")
+
+
+def _deny_child_network(*args, **kwargs):
+    raise RuntimeError("Pilot forbids real parent networking and unmocked Gateway operations")
+
+
+@contextmanager
+def _prepared_asyncio_loop(test_id):
+    """Prepare only the reviewed Windows fixture's internal self-pipe.
+
+    No connect exemption exists: construction precedes the case, and the
+    unchanged network denial covers its setup, body, teardown and loop close.
+    This is trusted-fixture compatibility, not hostile-code isolation.
+    """
+    if os.name != "nt" or test_id != ASYNC_SELF_PIPE_TEST:
+        yield
+        return
+    import asyncio
+    import threading
+    owner = (os.getpid(), threading.get_ident())
+    loop = asyncio.ProactorEventLoop()
+    active, used = True, False
+    def take_loop():
+        nonlocal used
+        require(active and not used and (os.getpid(), threading.get_ident()) == owner
+                and not loop.is_closed(), "Prepared asyncio loop is unavailable")
+        used = True
+        return loop
+    try:
+        # Windows ConnectEx/WSAConnect bypass socket.socket.connect. The
+        # prepared loop receives no authority to open another connection.
+        with patch.object(loop._proactor, "connect", _deny_child_network), \
+                patch.object(asyncio.events, "new_event_loop", take_loop):
+            yield
+            require(used, "Approved asyncio loop was not consumed")
+    finally:
+        active = False
+        if not loop.is_closed():
+            loop.close()
+
+
+@contextmanager
+def _child_network_guard(profile):
+    """The existing child denials; no address or caller-based exception."""
+    require(profile in {"fake-http-gateway", "closed-gateway"}, "Unknown child profile")
+    import harness
+    with ExitStack() as stack:
+        stack.enter_context(patch.object(socket.socket, "connect", _deny_child_network))
+        stack.enter_context(patch.object(socket.socket, "connect_ex", _deny_child_network))
+        stack.enter_context(patch.object(socket, "create_connection", _deny_child_network))
+        methods = (("request",) if profile == "fake-http-gateway"
+                   else ("request", "switch", "unload", "running"))
+        for method in methods:
+            stack.enter_context(patch.object(harness.Gateway, method, _deny_child_network))
+        yield
+
+
 def child_main(manifest_path, test_id, receipt_path, expected_sha, run_id, temp, expected_head, selection, batch, scope):
     """Pinned trusted test entry; not a recursive child-process guard."""
     offline_environment(Path(temp))
@@ -259,19 +318,11 @@ def child_main(manifest_path, test_id, receipt_path, expected_sha, run_id, temp,
     def counted(hook):
         original_hook(hook)
         hooks.append(type(getattr(hook,"__self__",None)).__name__)
-    def deny(*args,**kwargs):
-        raise RuntimeError("Pilot forbids real parent networking and unmocked Gateway operations")
-    import harness
     started = time.monotonic()
-    with ExitStack() as stack:
-        stack.enter_context(patch.object(sys,"addaudithook",counted))
-        stack.enter_context(patch.object(socket.socket,"connect",deny))
-        stack.enter_context(patch.object(socket,"create_connection",deny))
-        methods = (("request",) if manifest["entry_profiles"][test_id] == "fake-http-gateway"
-                   else ("request","switch","unload","running"))
-        for method in methods:
-            stack.enter_context(patch.object(harness.Gateway,method,deny))
-        result = unittest.TextTestRunner(verbosity=2,resultclass=Result).run(suite)
+    with _prepared_asyncio_loop(test_id):
+        with patch.object(sys,"addaudithook",counted), \
+                _child_network_guard(manifest["entry_profiles"][test_id]):
+            result = unittest.TextTestRunner(verbosity=2,resultclass=Result).run(suite)
     validate_sources(manifest)
     require(sha(Path(manifest_path).read_bytes()) == expected_sha, "Manifest changed during child")
     status = "PASS" if events == ["PASS"] and result.testsRun == 1 and result.wasSuccessful() else "ERROR"

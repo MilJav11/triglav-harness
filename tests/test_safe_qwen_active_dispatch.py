@@ -14,6 +14,63 @@ import test_safe_qwen_integration as integration
 from test_supervised_safe_qwen import wire
 
 
+def _dispatch_failure_diagnostic(result):
+    """At most 4096 ASCII bytes; closed fields only, never free-form text."""
+    import builtins
+    import math
+    import re
+
+    def mapping(value): return value if type(value) is dict else {}
+    def number(value):
+        return value if type(value) in (int, float) and 0 <= value <= 1e12 and math.isfinite(value) else None
+    def boolean(value): return value if type(value) is bool else None
+    exceptions = {name for name, cls in vars(builtins).items()
+                  if isinstance(cls, type) and issubclass(cls, BaseException)}
+    exceptions |= {"AdapterError", "DurableError", "Denied", "Stop", "OfflineExecutorError", "PolicyViolation"}
+    def choice(value, allowed): return value if type(value) is str and value in allowed else None
+    def category(value): return choice(value, exceptions)
+    files = {"supervised_safe_qwen.py", "safe_qwen_active_dispatch.py", "safe_qwen_active_recovery.py",
+             "safe_executor_binding.py", "winprocess.py", "harness.py", "supervision.py", "integration_shim.py"}
+    functions = {"_require", "require", "_run_worker", "check", "_model_check", "_verify_handles",
+                 "request", "fast_check", "live", "guard", "worker_contract", "require_owner",
+                 "validate_pinned", "event", "validate", "running", "begin", "finish"}
+    dispatch = mapping(mapping(result).get("dispatch"))
+    final = mapping(dispatch.get("result")); evidence = mapping(final.get("evidence"))
+    transport = mapping(evidence.get("transport")); failure = mapping(transport.get("failure"))
+    causes = failure.get("causes"); causes = causes[:4] if type(causes) is list else []
+    safe_causes = []
+    for cause in causes:
+        cause = mapping(cause); frames = cause.get("frames")
+        frames = frames[-4:] if type(frames) is list else []
+        safe_causes.append(dict(error_type=category(cause.get("error_type")),
+            code=choice(cause.get("code"), {"TIMEOUT", "WORKER_FAILED", "ACTION_LIMIT"}),
+            frames=[dict(file=choice(mapping(f).get("file"), files),
+                         function=choice(mapping(f).get("function"), functions),
+                         line=number(mapping(f).get("line"))) for f in frames]))
+    requests = transport.get("requests"); requests = requests[:4] if type(requests) is list else []
+    diagnostics = mapping(evidence.get("diagnostics")); text = diagnostics.get("text")
+    worker_codes = []
+    if type(text) is str:
+        worker_codes = [name for name in re.findall(r"SafeQwen worker failed: ([A-Za-z]+)", text[:4096])[:4]
+                        if name in exceptions]
+    cleanup = mapping(final.get("cleanup_proof")); process = mapping(dispatch.get("process"))
+    value = dict(outcome=choice(final.get("outcome"), {"executor_failed_unverified", "executor_succeeded_unverified"}),
+        protocol_failure=category(evidence.get("protocol_failure")),
+        termination_basis=choice(evidence.get("termination_basis"), {"not_launched", "executing", "controller_cancel",
+            "controller_deadline", "controller_exception", "signaled_without_controller_termination"}),
+        transport_failure=category(failure.get("error_type")), causes=safe_causes, worker_codes=worker_codes,
+        observed_exit_code=number(evidence.get("observed_exit_code")),
+        cleanup=choice(evidence.get("cleanup"), {"observed_empty", "not_observed"}),
+        cleanup_exit_code=number(cleanup.get("exit_code")),
+        cleanup_empty_job=boolean(cleanup.get("empty_job")), native_membership=boolean(process.get("membership")),
+        elapsed_seconds=number(final.get("elapsed_seconds")), duration_seconds=number(evidence.get("duration_seconds")),
+        started_clock=number(dispatch.get("started_clock")),
+        requests=[{key:number(mapping(row).get(key)) for key in ("number", "deadline", "timeout_seconds")} for row in requests],
+        stderr_bytes_observed=number(diagnostics.get("bytes_observed")), stderr_truncated=boolean(diagnostics.get("truncated")))
+    encoded = json.dumps(value, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
+    return encoded if len(encoded) <= 4096 else '{"diagnostic_truncated":true}'
+
+
 @unittest.skipUnless(os.name == "nt", "Real Windows native evidence required")
 class ActiveDispatchTests(unittest.TestCase):
     prepare_timeout_fixture = fixtures.ActiveAllocationTests.prepare_timeout_fixture
@@ -130,7 +187,8 @@ class ActiveDispatchTests(unittest.TestCase):
         self.on_request = delayed
         result = self.run_dispatch()
         self.assertEqual(sampled, [True])
-        self.assertEqual(result["dispatch"]["result"]["outcome"], "executor_succeeded_unverified")
+        self.assertEqual(result["dispatch"]["result"]["outcome"], "executor_succeeded_unverified",
+                         msg=_dispatch_failure_diagnostic(result))
         self.assertIsNone(self.sup.failure)
 
     def test_no_replay_duplicate_dispatch_third_attempt_or_verification(self):
