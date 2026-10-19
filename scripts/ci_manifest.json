@@ -3333,7 +3333,7 @@
     "tests/test_safe_qwen_active_dispatch_crash.py": "55e4c35aa77b606e6fda46bdb7aff6cc5d13204685864b0409bf389da7aaf230",
     "tests/test_safe_qwen_active_eligibility.py": "1bb8e7466a9121a6391ac4ecbd47b0050ba9dab86e7893ee1ccb3820eadfc394",
     "tests/test_safe_qwen_active_first.py": "f05a2990394a877278d0b6cc464273dd88b93f2302db810b512f3b1e3017d333",
-    "tests/test_safe_qwen_active_grant.py": "179173e050ea7793fc7f77ffe5bd614c1a32b477e136cce1199ad63c993e64d4",
+    "tests/test_safe_qwen_active_grant.py": "b3df034dbded421182c4c8929f2f8b7429884c80586367b6f6d68f825332868d",
     "tests/test_safe_qwen_active_second_verification.py": "07b6d48c42274a6613b93e30cd6c821d215eac4fb1e33823294e0af84aa82f14",
     "tests/test_safe_qwen_active_second_verification_crash.py": "fbd580f11d6f9dcf095ad8c3ffad59d1a88d747b374c4370540c1e3ee15ac8a8",
     "tests/test_safe_qwen_active_verification.py": "bfc50b6e558bbb096cf20028db8e7f740aca5a964ab9da6c5100c6d4c7640a81",

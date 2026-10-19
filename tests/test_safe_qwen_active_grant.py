@@ -17,7 +17,30 @@ REAL_CONSUME = durable.Store._consume_repair_grant
 
 @unittest.skipUnless(os.name == "nt", "Real Windows native evidence required")
 class ActiveGrantTests(unittest.TestCase):
-    setUp = fixtures.ActiveEligibilityTests.setUp
+    def setUp(self):
+        if self._testMethodName != "test_heartbeat_progress_during_owned_model_request":
+            return fixtures.ActiveEligibilityTests.setUp(self)
+        import json
+        import subprocess
+        import test_safe_qwen_integration as integration
+        self._heartbeat_budget = 120
+        prepared = integration.IntegrationTests.prepared
+        def bounded(fixture, *args, **kwargs):
+            # Freeze the positive grant scenario's budget before either ledger.
+            fixture.cfg["timeout_seconds"] = self._heartbeat_budget
+            fixture.data["unit_timeout_seconds"] = self._heartbeat_budget
+            fixture.path.write_text(json.dumps(fixture.cfg))
+            fixture.policy_path.write_text(json.dumps(fixture.data))
+            return prepared(fixture, *args, **kwargs)
+        with patch.object(integration.IntegrationTests, "prepared", bounded):
+            fixtures.ActiveEligibilityTests.setUp(self)
+        popen = subprocess.Popen
+        def inert_server(argv, *args, **kwargs):
+            if type(argv) is list and argv[-1] == "import time;time.sleep(60)":
+                argv = [*argv[:-1], f"import time;time.sleep({self._heartbeat_budget + 60})"]
+            return popen(argv, *args, **kwargs)
+        item = patch("subprocess.Popen", side_effect=inert_server)
+        item.start(); self.addCleanup(item.stop)
     prepare_timeout_fixture = fixtures.ActiveEligibilityTests.prepare_timeout_fixture
     stop_fixture = fixtures.ActiveEligibilityTests.stop_fixture
     servers = fixtures.ActiveEligibilityTests.servers
@@ -281,12 +304,31 @@ class ActiveGrantTests(unittest.TestCase):
 
     def test_heartbeat_progress_during_owned_model_request(self):
         import test_safe_qwen_active_verification as native
+        import time
+        # Deferred import reuses the reviewed closed serializer after this
+        # fixture module is fully initialized; no import-time fixture execution.
+        from test_safe_qwen_active_allocation import _allocation_diagnostic
+        observed = {"policy_calls": 0}
+        classify = eligibility.classify_for_grant
+        def observed_classification(owner):
+            observed["policy_calls"] += 1
+            observed.pop("decision", None); observed.pop("reason_code", None)
+            try:
+                decision = classify(owner)
+            finally:
+                observed["policy_clock"] = time.monotonic()
+            observed.update(decision=decision.decision, reason_code=decision.reason_code)
+            return decision
         # Reuse the reviewed real heartbeat test; only the selected operation differs.
-        self.run_first = self.issue
+        self.run_first = lambda **kwargs: self.issue(**dict(kwargs, timeout_seconds=self._heartbeat_budget))
         self.pulse_frequently = lambda: native.ActiveVerificationTests.pulse_frequently(self)
-        native.ActiveVerificationTests.test_heartbeat_progress_during_startup_and_model_request(self)
-        self.assertEqual(next(iter(self.reload().state["repair_authorizations"].values()))["state"], "GRANTED")
-        self.assert_single()
+        try:
+            with patch.object(eligibility, "classify_for_grant", observed_classification):
+                native.ActiveVerificationTests.test_heartbeat_progress_during_startup_and_model_request(self)
+            self.assertEqual(next(iter(self.reload().state["repair_authorizations"].values()))["state"], "GRANTED")
+            self.assert_single()
+        finally:
+            print("F3J_DIAGNOSTIC " + _allocation_diagnostic(self.store.state, observed, time.monotonic()), flush=True)
 
     def test_direct_json_and_old_versions_cannot_issue(self):
         with self.assertRaises(durable.DurableError): self.store._issue_ai_repair_grant({"mode": "ACTIVE_ATTEMPT1_GRANT"})
