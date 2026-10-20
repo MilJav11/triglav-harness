@@ -1,85 +1,49 @@
-# TRIGLAV public documentation
+# TRIGLAV documentation index
 
-**Three Heads. One Verdict.**
+Start with the [README](../../README.md). The [release locator](../TRIGLAV_START_HERE.md)
+contains the dated baseline and qualification boundaries; this index links to
+details without duplicating project state.
 
-This Experimental Public Preview documents the real local Windows controller and distinguishes it
-from the historical external SafeQwen deployment. The controller, tests and
-configuration templates are included. Local models, gateways, binaries and
-third-party CLIs must be provisioned separately.
+## Current guides
 
-The [SafeQwen integration](../SAFEQWEN.md) has 209 guarded offline cases.
-[Public Run 003](QUALIFICATION.md#public-run-003) qualified one bounded public
-three-model WorkUnit with a validated trusted checkpoint and native safety gates.
-Use the [portable Windows demo](../WINDOWS_SETUP.md) and public frozen fixture;
-models/runtimes remain external prerequisites. Historical Stage 2/TQ-02R are
-separate records; neither result establishes sustained long-horizon autonomy.
+- [PowerShell operator](../OPERATOR_RUNBOOK.md): canonical tracked wrapper, prerequisites, DryRun/session writes, live startup and exit codes.
+- [Portable Windows setup](../WINDOWS_SETUP.md): external assets, local configuration and disposable calculator demo.
+- [Architecture](../../ARCHITECTURE.md): current routes, deterministic trust, checkpoints versus terminal acceptance, and merged repair limits.
+- [Offline CI](../CI.md): 390 guarded / 1,296 mandatory qualification IDs, separate branding step and evidence collection; [current GitHub CI status](../TRIGLAV_START_HERE.md#current-github-ci-status).
+- [Terminal branding](../TERMINAL_BRANDING.md): display controls and maintainer Windows Terminal visual PASS; no cross-terminal visual qualification.
+- [Validation history](../../VALIDATION.md): dated offline and live scope, including current reporting semantics.
+- [Qualification ledger](QUALIFICATION.md): preserved sanitized historical live milestones.
+- [Roadmap](ROADMAP.md): remaining live repair, resume and longer-campaign qualification.
+- [Project contract](../../AGENTS.md): engineering and preservation rules.
 
-- [Current SafeQwen integration and CLI](../SAFEQWEN.md)
-- [Original/migrated SafeQwen source identities](../SAFEQWEN_SOURCE.md)
-- [Current snapshot architecture](../../ARCHITECTURE.md)
-- [Historical external route architecture](ARCHITECTURE.md)
-- [Current qualification summary and historical outcomes](QUALIFICATION.md)
-- [Evidence interpretation and claim map](EVIDENCE_SUMMARY.md#claim-map)
-- [Safety and limitations](SAFETY_AND_LIMITATIONS.md)
-- [Roadmap](ROADMAP.md)
-- [Configuration and actual CLI](../../RUNBOOK.md)
-- [Current validation scope](../../VALIDATION.md)
-- [Licensing and provenance](../../LICENSING.md)
-- [MIT software license](../../LICENSE)
-- [Brand usage policy](../../BRAND_USAGE.md)
-- [Approved independent artwork](assets/README.md)
+## Scoped technical and historical references
 
-No private reports, raw runs, chat identifiers, reference-derived art or
-experimental terminal branding are distributed.
+- [SafeQwen integration](../SAFEQWEN.md) and [HotPin policy](../HOTPIN_POLICY.md): tool/identity/resource contracts; their Phase 8 and 129/209-case validation sections are historical, not current CI totals.
+- [SafeQwen migration identities](../SAFEQWEN_SOURCE.md): historical source provenance, not a current runtime manifest.
+- [Durable storage/recovery](../../DURABLE_RUNS.md) and [process supervision](../../PROCESS_SUPERVISION.md): route-specific persistence and ownership details.
+- [Legacy Windows/custom runbook](../../RUNBOOK.md), [recovery notes](../../CONVERGENCE.md) and [OpenCode boundary](../../OPENCODE_BOUNDARY.md): earlier routes and dated investigations; not substitutes for the current operator guide.
+- [Historical external architecture](ARCHITECTURE.md), [evidence claim map](EVIDENCE_SUMMARY.md#claim-map) and [safety background](SAFETY_AND_LIMITATIONS.md): historical deployment context; current reporting/repair status is in the guides above.
+- [Historical Phase 3 design](PHASE3_DESIGN.md): original proposal, with current-status pointers; not a new implementation checklist.
 
-## Architecture and operation
+## Local evidence and external dependencies
 
-Start with the [current source architecture](../../ARCHITECTURE.md), including its
-Mermaid trust flow, then the [runbook](../../RUNBOOK.md),
-[SafeQwen CLI and policy](../SAFEQWEN.md),
-[durable storage/recovery](../../DURABLE_RUNS.md#storage-and-trust) and
-[process supervision](../../PROCESS_SUPERVISION.md). The
-[historical external architecture](ARCHITECTURE.md) retains accurate historical
-Mermaid diagrams; it describes the earlier launcher/binding route.
-For model-free usage, use the [source-only Quick Start](../../README.md#quick-start)
-and [guarded CI scope](../CI.md).
+The controller stores private run bundles under `runs/<run-id>/`. events.jsonl is
+the authoritative WAL; state.json is a cache and final-report.json a projection.
+Review artifacts use milestones/, final checks final_verification/, checkpoints
+checkpoints/, and terminal-enabled runs acceptance/. Legacy rounds use rounds/.
+A checkpoint is not a terminal seal. Keep full referenced evidence locally;
+do not publish raw prompts, sessions, credentials, model paths or archive inventories.
 
-## Local Store and checkpoint records
+The repository includes standard-library Python controller/tests, configuration
+examples, the operator script and terminal artwork. Compatible llama-swap,
+llama.cpp/optional HotPin binaries, licensed model weights and approved expert
+assets are separately provisioned. The wrapper contains installation-specific
+paths; portable setup uses local JSON/YAML files. New hosts require their own
+validation. Optional OpenCode/Cline adapters are separate executor routes.
 
-The public controller normally stores durable records under `runs/<run-id>/`
-in its controller checkout. `state.json` is the cache, `events.jsonl` the ledger,
-`rounds/` holds legacy round verification/review artifacts. WorkUnit milestone
-state and evidence references are recorded in `state.json` and `events.jsonl`;
-critic and senior reviewer result artifacts are under `milestones/`, and
-fresh final verification evidence is under `final_verification/`.
-`checkpoints/` holds checkpoints, and `final-report.json` is the report. See the
-[storage protocol](../../DURABLE_RUNS.md#storage-and-trust).
-These are operator-local records, not public documentation. Private qualification
-tooling also preserves session records and Store copies outside the public source
-tree; no private location or archive is published here.
+[.gitignore](../../.gitignore) excludes specified runtime/run/configuration paths;
+it is not a blanket protection for all local assets. Review publication scope.
+Original qualification reports and source provenance remain historical evidence.
 
-## Git exclusions
-
-[.gitignore](../../.gitignore) excludes `runs/`, `tools/llama-swap/`, `/runtime/`,
-the operator files `/config/safeqwen.local.json` and
-`/config/safeqwen-policy.local.json`, `.venv/`, `.pytest_cache/`, `__pycache__/`
-and `*.pyc`. Model weights, native binaries, private sessions, credentials,
-raw prompts and Store archives are not distributed. Git ignore rules cover only
-their listed paths; keep other operator assets outside the checkout or explicitly
-excluded, and inspect changes before publication. Public configuration examples
-and sanitized qualification summaries are tracked.
-
-## Dependencies and missing integration assets
-
-| Publicly available source/guidance | Separately provisioned or private assets |
-|---|---|
-| Standard-library Python controller, tests, SafeQwen worker/launcher and identity binding | Native Windows, Python 3.11+, Git and PowerShell installation; pytest only for optional development use |
-| Gateway configuration templates and startup scripts | Compatible llama-swap and llama.cpp/HotPin binaries, licensed Qwen/Nemotron/GPT-OSS weights, reviewer expert files and resource capacity |
-| SafeQwen configuration/policy examples | Exact local runtime commands, paths, ownership/PID records, role configuration and operator policy for a new host |
-| Retained optional OpenCode/Cline adapters | Separately installed third-party CLIs and their own configuration/licenses |
-| Sanitized Phase 8B Stage 2 qualification summary | Private operator/watchdog, broker, heartbeat, lifecycle/resource-check helpers, frozen qualification fixture/oracle, deployment manifests, session telemetry and Store evidence |
-
-The private integration assets are not a public setup kit. Source-only checks
-are reproducible within their documented Windows scope; the proposed source snapshot is audited separately from any published remote.
-Live asset provisioning and each new host remain operator responsibilities. New deployment validation and broader fixture,
-failure-path and autonomy qualification remain [roadmap work](ROADMAP.md).
+[Licensing](../../LICENSING.md) · [MIT license](../../LICENSE) ·
+[Brand policy](../../BRAND_USAGE.md) · [Artwork provenance](assets/README.md).

@@ -1,93 +1,134 @@
-# TRIGLAV — Operator Runbook
+# TRIGLAV operator runbook
 
-This guide describes how to operate the TRIGLAV Local AI Long-Horizon Coding Harness from Windows PowerShell using the verified operator wrapper script:
+The canonical operator is the tracked
+[scripts/Invoke-Triglav.ps1](../scripts/Invoke-Triglav.ps1) in the release checkout.
+The separately installed tools/triglav/Invoke-Triglav.ps1 differs: it lacks the
+merged splash and -Quiet handling. Do not assume the copies are interchangeable.
+This guide describes the tracked version at the [release baseline](TRIGLAV_START_HERE.md).
 
-`scripts/Invoke-Triglav.ps1` (or `C:\AI\tools\triglav\Invoke-Triglav.ps1`)
+## Prerequisites and scope
 
----
+Use native x64 Windows, Python 3.11+, Git and PowerShell. Run from the release
+root; the controller Store must be outside the target repository. The target
+needs a committed, clean Git baseline and trusted frozen tests. Verification
+executes target code; Windows Job Objects supervise processes, not filesystem
+or network isolation.
 
-## 1. System Requirements & Hardware Gates
+The wrapper embeds installation-specific runtime, model, expert-digest and
+session paths. Inspect those values in the tracked script before use; -TriglavRoot
+selects the controller checkout, not an alternative model/runtime installation.
+Provisioned compatible llama-swap, llama-server and GGUF files are required even
+for configuration validation. Use the [portable Windows recipe](WINDOWS_SETUP.md)
+with local JSON/YAML configuration on a different installation.
 
-- **Supported Platform:** Windows 10/11 Pro 64-bit (x64)
-- **Minimum RAM for Single-Model (Qwen):** $\ge 16\text{ GiB}$ free physical RAM
-- **Minimum RAM for Three-Model (Qwen + Nemotron + GPT-OSS):** $\ge 44\text{ GiB}$ free physical RAM (strict HotPin reviewer admission gate)
-- **GPU:** NVIDIA GPU with $\ge 6\text{ GB}$ VRAM (e.g. RTX A3000)
-- **Runtimes & Models:** Local GGUF models in `C:\AI\models\`, `llama.cpp` in `C:\AI\runtimes\llama.cpp\`, HotPin runtime in `C:\AI\runtimes\hotpin\`, and `llama-swap.exe` gateway.
+Live single-model preflight requires 16 GiB available physical RAM; -ThreeModel
+requires 44 GiB. The HotPin reviewer additionally requires the approved expert
+identity and native 32 GiB hard working-set readback before inference. These
+are policy gates, not guarantees about loading memory, total RAM or VRAM.
+See [HotPin policy](HOTPIN_POLICY.md).
 
----
+SafeQwen exposes only read_files, edit_file and submit. All -AllowPaths and
+-ForbidPaths entries must already be regular files at baseline. Edits require
+the current before_sha256 and one exact anchor occurrence. **No dynamic file
+creation, deletion or model-selected shell commands are supported.** A clean
+baseline does not promise automatic rollback of failed or ambiguous edits.
 
-## 2. Key Scope & Architectural Constraints
+## DryRun first
 
-1. **Clean Baseline Repository:**
-   The target repository must be a clean Git working copy (`git status --porcelain` must be empty). Dirty repositories are rejected immediately to guarantee deterministic rollbacks.
-2. **Existing-File Limitation (Current Release):**
-   The SafeQwen executor operates exclusively via anchor replacements (`edit_file`) on files with verified cryptographic digests (`before_sha256`). All files specified in `-AllowPaths` **must already exist** in the repository at baseline. Dynamic file creation is not yet supported.
-3. **Deterministic Verification:**
-   Every task requires an approved verification command (`-Verify`, e.g. `python -m unittest test_calculator.py`). No changes are accepted without passing deterministic tests.
-
----
-
-## 3. Operator Workflow
-
-### Step 1: Preflight Dry-Run (Zero Models, Zero Risk)
-Always validate arguments, file boundaries, and budgets first without starting gateways or loading models into RAM:
-
-```powershell
-scripts\Invoke-Triglav.ps1 `
-    -Repo "C:\projects\my-app" `
-    -Task "Implement multiply(a, b) in calculator.py without changing add() or frozen tests" `
-    -Verify "python -m unittest test_calculator.py" `
-    -AllowPaths "calculator.py" `
-    -ForbidPaths "test_calculator.py", ".gitignore" `
-    -ThreeModel `
-    -DryRun
-```
-- **Exit Code 0:** Configuration and policy are valid.
-- **Non-zero Exit:** Parameter or scope error (e.g. dirty repository, missing file, or invalid verification command).
-
-### Step 2: Live Three-Model Execution
-Execute the full local AI pipeline:
-1. **Qwen3-Coder-30B** explores code, applies diff, and verifies candidate tests.
-2. **Nemotron-3.5-30B** evaluates diff as independent critic (`CRITIC_CLEAN`).
-3. **GPT-OSS-120B** loads via HotPin ($\le 32\text{ GiB}$ working set) and performs senior review (`APPROVE`).
-4. **Final deterministic verification** runs freshly inside an isolated Windows Job Object.
-5. **Trusted checkpoint** is sealed in the WAL.
+After provisioning the installation and a disposable target, from the release root:
 
 ```powershell
-scripts\Invoke-Triglav.ps1 `
-    -Repo "C:\projects\my-app" `
-    -Task "Implement multiply(a, b) in calculator.py without changing add() or frozen tests" `
-    -Verify "python -m unittest test_calculator.py" `
-    -AllowPaths "calculator.py" `
-    -ForbidPaths "test_calculator.py", ".gitignore" `
-    -ThreeModel
+$targetRepo = 'C:\projects\disposable-calculator' # example target, not the controller
+$taskText = 'Implement multiply without changing add or the frozen tests'
+$operatorArgs = @{
+    Repo = $targetRepo
+    Task = $taskText
+    Verify = 'python -m unittest test_calculator.py'
+    AllowPaths = @('calculator.py')
+    ForbidPaths = @('test_calculator.py', '.gitignore')
+    TriglavRoot = (Get-Location).Path
+}
+.\scripts\Invoke-Triglav.ps1 @operatorArgs -DryRun
 ```
 
-*(For single-model execution without critic and senior reviewer gates, omit `-ThreeModel`.)*
+DryRun checks the clean target, existing scope, generated configuration, command
+allowlist and budgets, then delegates to the real controller's --dry-run.
+It queries host RAM metadata but skips the wrapper's live RAM-floor checks;
+controller resource/policy validation still applies. It starts no gateway or model
+and runs no target verification commands.
 
-### Step 3: Inspect Diff & Verify
-Upon completion, the target repository contains uncommitted modifications strictly confined to `-AllowPaths`:
+**DryRun does write operator files:** a timestamped session directory containing
+policy.json, safeqwen.json and llama-swap.yaml, plus a temporary gateway.pid with
+value 0 that it attempts to remove in finally. The target files are not edited,
+and the controller creates no durable run for dry-run. The script's “zero files
+modified” success text must be understood with these session writes in mind.
+Exit 0 means validation passed; it does not prove model readiness or task success.
+
+Add -ThreeModel to validate the critic/reviewer configuration too. Add -Quiet to
+suppress the splash and controller progress; operator diagnostics/results remain.
+
+## Live startup and outcomes
+
+Only after a passing dry-run and authorization for the intended local model run:
 
 ```powershell
-# Review git diff
-git -C "C:\projects\my-app" diff
-
-# Manually execute tests
-python -m unittest test_calculator.py
+# Single-model coding; omit -DryRun.
+.\scripts\Invoke-Triglav.ps1 @operatorArgs
+# Alternatively, choose the three-model route for a separate intended run:
+# .\scripts\Invoke-Triglav.ps1 @operatorArgs -ThreeModel
 ```
 
-### Step 4: Accept or Reject Changes
-The operator retains exclusive authority over repository commits:
+Choose one invocation; do not run both automatically against the same fixture.
+Each fresh run requires its own clean, reviewed target. Preserve failed attempts.
 
-- **To Accept and commit changes:**
-  ```powershell
-  git -C "C:\projects\my-app" add "calculator.py"
-  git -C "C:\projects\my-app" commit -m "TRIGLAV: Implement multiply(a, b)"
-  ```
-- **To Reject and discard changes:**
-  ```powershell
-  git -C "C:\projects\my-app" restore "calculator.py"
-  ```
+The live wrapper checks port 9292 for an existing connection, starts its dedicated
+loopback llama-swap with stdout/stderr redirected into the session, writes its
+PID file and waits up to 30 seconds for an HTTP response from /upstream. This is
+gateway startup, not proof that a model is loaded. The controller then handles
+model lifecycle, scoped execution and deterministic verification. The ordinary
+entry point supplies one fixed WorkUnit with one worker attempt.
 
-### Step 5: Safe Termination
-If a task needs to be cancelled during active execution, pressing `Ctrl+C` triggers the PowerShell `finally` handler, which gracefully unloads active models, terminates `llama-swap.exe` and child server processes, and deletes the temporary session PID file.
+| Outcome | Meaning |
+|---|---|
+| DryRun exit 0 | Configuration/scope/budget validation only |
+| Code-only exit 2, READY / MILESTONE_READY | Intermediate verified candidate; no trusted checkpoint. The wrapper propagates the nonzero controller outcome and may print a failure diagnostic |
+| Three-model exit 0, COMPLETED with valid checkpoint evidence | Applicable critic/reviewer and fresh-final-verifier gates passed; inspect actual evidence |
+| Other nonzero exit or uncertain cleanup | Preserve the candidate and evidence for review; no acceptance inference |
+
+The three-model route runs Qwen execution, Nemotron advisory critique and GPT-OSS
+review requiring APPROVE, followed by fresh deterministic verification and
+controller checkpoint gates. Critic findings can be advisory; do not require a
+CRITIC_CLEAN label as a universal acceptance condition.
+
+**The ordinary wrapper/CLI does not enable terminal acceptance.** A checkpoint
+is not an acceptance/term-*.json seal. Historical B2 completed with a checkpoint,
+not terminal acceptance. The separate terminal lifecycle requires explicit
+terminal_acceptance opt-in, verified cleanup, checkpoint commitment and WAL-bound
+terminal sealing; see [architecture](../ARCHITECTURE.md).
+
+## Inspect and stop
+
+The controller prints the run ID and stores evidence under its own `runs/<run-id>/`:
+events.jsonl is authoritative, state.json is a cache, final-report.json is a
+projection; milestones/, final_verification/ and checkpoints/ hold referenced
+artifacts. Terminal-enabled runs additionally have acceptance/. Gateway logs and
+generated configuration remain in the separate operator session directory.
+Keep these private; preserve both successful and failed evidence.
+
+```powershell
+git -C $targetRepo diff
+# If independent target verification is authorized, run it in the target:
+Push-Location -LiteralPath $targetRepo
+try { python -m unittest test_calculator.py } finally { Pop-Location }
+```
+
+The operator reviews and authorizes any later commit or discard. The wrapper
+leaves candidate edits uncommitted; it does not grant permission to publish them.
+
+On normal return or a catchable interruption, finally attempts model unload,
+gateway stop and temporary PID-file removal. Some failures are suppressed;
+“Gateway stopped” is not independent proof that every owned process exited.
+Ctrl+C is not qualified safe live interruption/resume. Inspect ownership and
+retained evidence before further action; never terminate an unknown process or
+assume a failed run is safe to resume. See [supervision](../PROCESS_SUPERVISION.md)
+and [unqualified scope](TRIGLAV_START_HERE.md).

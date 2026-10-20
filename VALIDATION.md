@@ -1,8 +1,44 @@
 # TRIGLAV public validation summary
 
-This is a sanitized summary for the clean public snapshot. Original internal
-reports, run directories, chat identifiers and machine-local evidence links are
-excluded. No private retained evidence was accessed during this export audit.
+This is a sanitized validation history. Original reports and evidence remain
+unchanged; machine-local inventories and evidence archive paths are not published.
+The current source locator is [release status](docs/TRIGLAV_START_HERE.md).
+
+## Release baseline — 20 October 2026
+
+Merged main at c6a90fd includes Phase 3.1 bounded repair (PR #8), operator
+hardening and evidence-backed criteria reporting (PR #9), and terminal branding
+(PR #10). See [current GitHub CI status](docs/TRIGLAV_START_HERE.md#current-github-ci-status).
+
+The configured [CI scope](docs/CI.md) has 390 guarded cases plus 848 supplemental,
+21 policy and 37 runner/security IDs: **1,296 mandatory qualification IDs**.
+Focused branding/operator tests run separately. An earlier retained hosted
+summary records FULL_PHASE3_1_QUALIFIED, 1,296 distinct passes, tested merge SHA
+5a359c8b35e24f9d0c560adbf6198e7d694ebf10, batch 39315401985.1. That result is
+historical offline qualification; it does not qualify this revision or live repair.
+
+The maintainer reports **Windows Terminal visual PASS** for portrait, color and
+alignment. No cross-terminal visual qualification is claimed; see
+[terminal branding](docs/TERMINAL_BRANDING.md).
+
+Historical live scope remains bounded. Live 001/002 below establish the real
+three-model terminal route. The later B2 demonstration recorded a completed
+checkpoint and passing final verification with terminal acceptance disabled;
+it must not be relabelled as an acceptance seal. Real-model error-driven repair,
+safe live interruption/resume, TTL reload and campaigns beyond two SafeQwen units
+remain unqualified. Successful first attempts do not demonstrate recovery.
+
+PR #9 now projects checkpoint-backed final-verifier evidence through
+evaluate_completion/criteria_status/write_report. A completion label alone is
+not proof. Historical NOT_PROVEN/completion-null reports remain original;
+matching cached projections can retain older values. No historical report was
+regenerated and no runtime qualification was performed in this documentation task.
+
+## Historical export and qualification records
+
+The following sections retain their original revision-specific scope. Phrases
+about export review, source counts or test execution describe those historical
+checks, not a new validation of the release baseline.
 
 ## Historical Phase 5 offline checks
 
@@ -86,13 +122,14 @@ These statements are inherited sanitized summaries, not fresh verification of
 private evidence. Historical review approval is not semantic proof. The earlier
 QUAL-004 false-trust case remains a counterexample to broad safety claims.
 
-The reporting discrepancy remains: top-level ALL_CRITERIA_PROVEN, nested AC1–AC3
-NOT_PROVEN, and completion=null. No code repair or qualification upgrade is implied.
+Those historical reports retain top-level ALL_CRITERIA_PROVEN, nested AC1–AC3
+NOT_PROVEN and completion=null. See the release-baseline reporting distinction above.
 
 ## Limits
 
-No current model, gateway, third-party CLI, hardware, cross-host restoration,
-hostile-repository safety or long-horizon qualification was performed.
+The export checks above did not qualify current models, gateways, third-party
+CLIs, hardware, cross-host restoration, hostile-repository safety or long-horizon
+operation. Later bounded live milestones are recorded separately below.
 No checkpoint or cryptographic digest is a human approval signature.
 
 [Qualification scope](docs/triglav/QUALIFICATION.md) ·
@@ -125,7 +162,7 @@ TQ-02R qualification. Phase 8B requires separate owner-authorized live validatio
 
 The later readiness assessment verified public HEAD
 `1a3167830f8d1fdf79dba255346784f57793a3ce`, 111 tracked files and **129/129**
-guarded offline CI cases passed. The current selection adds ten milestone verifier
+guarded offline CI cases passed. That selection added ten milestone verifier
 timeout regressions to the historical 119-case Phase 8A selection; see
 [current CI scope](docs/CI.md). Historical counts above remain historical results.
 
@@ -145,7 +182,7 @@ Following Phase 8B, the Triglav harness integrated durable terminal acceptance, 
 | **M0-A** | `590e16e4b83296050c943db7a273c2cef71c584a` | 309 cases | Terminal acceptance WAL primitive in `durable.py`, tamper-evident seal, orphan seal prevention, crash recovery. |
 | **M0-B** | `eca6cf816c32e38c43042b433068207b1b9f6cdf` | 352 cases (83 durable) | Controller authority enforcement, 1-to-1 verifier WAL binding, pre-write publication guard, supervisor heartbeat value invariants. |
 | **M0-C** | `236d08fa3b3ca771f1f7d2b6654348a298a28a98` | 373 cases | Full terminal lifecycle acceptance, verified supervisor/gateway cleanup, checkpoint history preservation across interrupted finalization, idempotent reporting. |
-| **Current CI** | `92cd9e03148f4dd5fbe3bb532601c0a9d3f5d80d` | **390 cases** | Added two-WorkUnit dependency execution and production offline regression suites (`test_safe_qwen_multi_unit.py`, `test_safe_qwen_multi_unit_prod.py`). Zero live model calls. |
+| **Live 002 baseline** | `92cd9e03148f4dd5fbe3bb532601c0a9d3f5d80d` | **390 cases** | Added two-WorkUnit dependency execution and production offline regression suites (`test_safe_qwen_multi_unit.py`, `test_safe_qwen_multi_unit_prod.py`). Zero live model calls. |
 
 All 390 cases run under strict execution guards in `scripts/ci_offline.py` (prohibiting unauthorized sockets, alternative process spawns, unmocked Gateway requests, and unapproved fixture modifications).
 

@@ -1,10 +1,16 @@
 # Offline CI scope
 
-The [Offline CI workflow](../.github/workflows/offline-ci.yml) runs on
-GitHub-hosted Windows 2025 with Python 3.11, the documented minimum supported
-version. It runs for pull requests targeting main and pushes to main.
+Current structure at the [release baseline](TRIGLAV_START_HERE.md), 20 October 2026.
+See [current GitHub CI status](TRIGLAV_START_HERE.md#current-github-ci-status).
+Configured coverage below is not a claim that the current run passed.
 
-Use the same entry point locally from a committed Windows checkout:
+The [Offline CI workflow](../.github/workflows/offline-ci.yml) runs on
+GitHub-hosted Windows 2025. The guarded job uses Python 3.11; supplemental and
+mandatory-group jobs use Python 3.12. Pull requests targeting main and pushes to
+main select full qualification. Manual workflow_dispatch can select guarded-only
+execution with full_qualification=false; that cannot qualify the full scope.
+
+Run the guarded subset locally from a committed Windows checkout:
 
 ```powershell
 python -B scripts/ci_offline.py
@@ -15,7 +21,38 @@ Git are sufficient. The workflow uses official checkout v7.0.1 and setup-python
 v7.0.0 actions pinned to their full verified commit SHAs. Python provisioning is
 limited to the ephemeral GitHub runner; no local model/gateway/CLI is installed.
 
-## Reviewed checks
+## Full qualification and evidence
+
+[scripts/ci_manifest.json](../scripts/ci_manifest.json) defines exact reviewed IDs:
+
+| Group | Mandatory IDs |
+|---|---:|
+| guarded | 390 |
+| supplemental (nine disjoint shards) | 848 |
+| policy_proof | 21 |
+| runner_security | 37 |
+| **Total** | **1,296** |
+
+The guarded job additionally runs test_terminal_branding*.py as a separate
+branding/PowerShell operator step. Those IDs are listed in outside_scope because
+they are outside the fixed Phase 3.1 groups, not because the workflow skips them.
+Other outside_scope tests are not implied to run. Sources, the operator script
+and workflow are pinned by the reviewed manifest; this documentation update does
+not change pins or qualification groups.
+
+Each qualification job writes structured evidence. The full-summary collector
+requires the complete exact manifest selection, consistent source/HEAD/batch
+identities and successful upstream jobs before FULL_PHASE3_1_QUALIFIED.
+Artifacts are uploaded and collected by pinned actions, retained for 14 days.
+A green guarded job alone, partial shard output or an older summary cannot prove
+current full qualification.
+
+An earlier retained hosted summary recorded 1,296 distinct passes for tested
+merge SHA 5a359c8b35e24f9d0c560adbf6198e7d694ebf10 (batch 39315401985.1).
+That is historical offline qualification, not a result for c6a90fd or live repair.
+See [validation history](../VALIDATION.md).
+
+## Guarded checks (390 cases)
 
 - Parse all repository Python source with ast.parse.
 - Thirty-five isolated tests of the CI guard itself (including denial of
@@ -47,8 +84,8 @@ there is no gateway, model server or arbitrary verifier invocation. The only
 shell allowance is the exact System32 cmd /c ver query used by Python 3.11
 for read-only Windows version metadata.
 Imported helper modules do not imply that their other test cases are executed.
-The rest of the existing suite remains outside reviewed scope; importing helper
-modules does not execute their unrelated test cases. The eight selected cases
+Cases outside this guarded selection are not executed merely by importing helper
+modules; supplemental qualification selects its own exact IDs. The eight selected cases
 from test_reviewer_wave6 and eleven selected Manager cases are listed explicitly
 in scripts/ci_offline.py.
 
@@ -117,18 +154,32 @@ are not an OS sandbox for deliberately malicious pull-request code.
 
 ## Workflow security and limits
 
-The workflow has contents: read only, a ten-minute timeout and no repository secrets,
-credential persistence, deployment, publication, artifact upload or dependency
-cache. It uses pull_request rather than pull_request_target, and executes the
-event revision on an ephemeral hosted runner. It does not grant write permissions
-or consume private evidence. Fork-run approval follows GitHub's repository policy.
+The workflow has contents: read only, no credential persistence, deployment,
+publication or dependency cache, and no configured repository secrets. It uses
+pull_request rather than pull_request_target and executes the event revision on
+ephemeral hosted runners. It uploads generated CI evidence, not private retained
+model runs. Fork-run approval follows GitHub's repository policy.
+
+| Jobs | Time limit per job |
+|---|---:|
+| Guarded plus focused branding/operator step | 35 minutes |
+| Nine supplemental shard jobs | 120 minutes |
+| Policy and runner mandatory jobs | 45 minutes |
+| Full-summary collector | 15 minutes |
+
+The guarded runner denies unapproved process/socket/model operations. Supplemental
+qualification uses the reviewed trusted-entry process policy and real Windows
+supervision. These are distinct guard boundaries: Python hooks do not propagate
+to arbitrary descendants, and neither route provides OS-enforced network or
+filesystem isolation against malicious test code. Offline success proves only
+the reviewed fixtures and policy scope.
 
 Success covers this bounded offline scope, not the full test suite, live platform
 setup, model quality, live SafeQwen deployment, TQ-02R reproduction or production
 qualification. Failure output remains visible in the Actions log; no raw local
 audit report or retained private evidence is uploaded.
 
-[Validation history](../VALIDATION.md) Â·
+[Validation history](../VALIDATION.md) ·
 [Safety limits](triglav/SAFETY_AND_LIMITATIONS.md).
 
 See [SafeQwen tests and limits](SAFEQWEN.md#offline-checks-and-historical-scope).

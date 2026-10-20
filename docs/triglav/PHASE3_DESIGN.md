@@ -1,10 +1,18 @@
 # TRIGLAV Phase 3 — Architecture Design
 
-> **Document Type:** Technical Architecture Specification<br>
-> **Status:** PROPOSED Architecture Design (Not Implemented / Not Live Qualified)<br>
+> **Document Type:** Historical pre-implementation design reference<br>
+> **Status:** Original M0-based proposal; superseded for current implementation status<br>
 > **Platform Baseline:** Native Windows (x64 Python 3.11+ / 3.12)<br>
 > **Current Reference Milestone:** `LIVE_002_INDEPENDENTLY_CONFIRMED` (`92cd9e03148f4dd5fbe3bb532601c0a9d3f5d80d`)<br>
 > **Target Milestones:** Phase 3.1 (Bounded Unit Recovery) & Phase 3.2 (Safe Interrupt & Resume)
+
+**Scope note (20 October 2026):** Phase 3.1 repair machinery is now merged and has
+earlier offline qualification; its live repair path remains unqualified. The
+proposal's old gap matrix, implementation steps and source line numbers below
+are historical design context, not a current implementation checklist. Use the
+[current architecture](../../ARCHITECTURE.md), [release status](../TRIGLAV_START_HERE.md)
+and [roadmap](ROADMAP.md). Initial proposed Phase 3.2 resume remains limited to
+verified inter-unit boundaries; no in-flight inference restoration is claimed.
 
 ---
 
