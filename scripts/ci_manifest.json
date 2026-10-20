@@ -1921,6 +1921,37 @@
       "test_reviewer_wave6.TestReviewerWave6.test_completed_wave6_manager_reruns_are_terminal_after_reload",
       "test_reviewer_wave6.TestReviewerWave6.test_completed_wave6_tampered_evidence_cannot_use_terminal_shortcut",
       "test_reviewer_wave6.TestReviewerWave6.test_live_qualification_cached_critic_manager_continuation",
+      "test_terminal_branding.BrandingTests.test_art_and_branding_do_not_enter_controller_or_records",
+      "test_terminal_branding.BrandingTests.test_broken_terminal_and_render_failures_are_cosmetic",
+      "test_terminal_branding.BrandingTests.test_configured_alias_and_metadata_are_dynamic",
+      "test_terminal_branding.BrandingTests.test_encoding_limitations_fall_back",
+      "test_terminal_branding.BrandingTests.test_every_half_block_has_correct_rgb_and_reset",
+      "test_terminal_branding.BrandingTests.test_git_queries_use_target_repo_and_are_bounded",
+      "test_terminal_branding.BrandingTests.test_interactive_preview_reads_config_and_forwards_active_roles",
+      "test_terminal_branding.BrandingTests.test_minimum_graphical_viewport_and_long_metadata",
+      "test_terminal_branding.BrandingTests.test_missing_dimensions_use_compact_fallback",
+      "test_terminal_branding.BrandingTests.test_missing_git_and_detached_head_are_graceful",
+      "test_terminal_branding.BrandingTests.test_no_color_even_empty_and_dumb_terminal",
+      "test_terminal_branding.BrandingTests.test_no_color_output_is_clean_ascii",
+      "test_terminal_branding.BrandingTests.test_non_tty_and_quiet_do_no_git_or_render_work",
+      "test_terminal_branding.BrandingTests.test_original_artwork_bytes_preserved",
+      "test_terminal_branding.BrandingTests.test_palette_and_all_pixels_valid",
+      "test_terminal_branding.BrandingTests.test_portrait_alignment_and_final_reset",
+      "test_terminal_branding.BrandingTests.test_preview_malformed_config_returns_zero",
+      "test_terminal_branding.BrandingTests.test_preview_never_opens_config_when_captured_or_quiet",
+      "test_terminal_branding.BrandingTests.test_single_model_does_not_advertise_disabled_roles",
+      "test_terminal_branding.BrandingTests.test_single_print_to_terminal_only",
+      "test_terminal_branding.BrandingTests.test_small_viewports_never_wrap_or_overflow",
+      "test_terminal_branding.BrandingTests.test_status_is_only_starting_or_dry_run",
+      "test_terminal_branding.BrandingTests.test_terminal_control_and_unicode_metadata_are_sanitized",
+      "test_terminal_branding.BrandingTests.test_three_model_and_two_model_follow_enabled_roles",
+      "test_terminal_branding.BrandingTests.test_windows_terminal_and_vscode_truecolor",
+      "test_terminal_branding_operator.OperatorBrandingTests.test_controller_exit_and_cleanup_source_unchanged",
+      "test_terminal_branding_operator.OperatorBrandingTests.test_controller_failure_still_cleans_up",
+      "test_terminal_branding_operator.OperatorBrandingTests.test_cosmetic_failure_does_not_change_cleanup_or_success",
+      "test_terminal_branding_operator.OperatorBrandingTests.test_quiet_suppresses_preview_and_reaches_controller",
+      "test_terminal_branding_operator.OperatorBrandingTests.test_real_single_model_dry_run",
+      "test_terminal_branding_operator.OperatorBrandingTests.test_real_three_model_dry_run",
       "test_verified_existing.VerifiedExistingGateTests.test_implementation_valid_fails_closed_when_not_proven",
       "test_verified_existing.VerifiedExistingGateTests.test_verified_existing_does_not_require_fake_repository_change",
       "test_wave61_lifecycle.Wave61LifecycleTests.test_commit_does_not_publish_caller_owned_workunit_alias",
@@ -3201,7 +3232,7 @@
   ],
   "source_sha256": {
     ".gitattributes": "fb4200024868fe58f7855899862c03c4d92eb6b17212a507b3290db039fe9946",
-    ".github/workflows/offline-ci.yml": "66753971daa8d4a10a14f0999608502cc4ab34bef93ee445d2b12772fda277a4",
+    ".github/workflows/offline-ci.yml": "b6e157b43ebac0061c0a9e2c828460509c7836aba2c6f8a80b67dfbe668b5412",
     ".gitignore": "265f010050ab701724ed2c91b78ccc3f9b7291644d6dd7c65c82f302bc753e0f",
     "AGENTS.md": "4b14e8bafcc91c854a00b09ba754834ec49b77fb27db85126955991554d82576",
     "ARCHITECTURE.md": "f2f7f140787642917869207dca872dfb1c4812d7b17a89739f7eaf50a525baf6",
@@ -3370,7 +3401,13 @@
     "winprocess.py": "8dc43c9e0e223691ecb5c79f30dd765299aea7f41e624e4913b2f119f3863c56",
     "work_unit_planner.py": "f1cfe83f81a93f09e49d0921fda844e7a755b53735e0e840b23f60f922f5285e",
     "work_unit_scheduler.py": "4bc2083790832ddf318a6e9d7d1dae4b41f32c12b6808fb1da72d316e370b7ac",
-    "work_units.py": "410b6c70f7378f40c64015d670ccf1bdf555ac3df9abd2e03570e8be10c69fb8"
+    "work_units.py": "410b6c70f7378f40c64015d670ccf1bdf555ac3df9abd2e03570e8be10c69fb8",
+    "branding.py": "7d6a075f839ca92ad9a6373abea370247da6b267bc46b4e36e069ee9dc3bd00b",
+    "triglav_art.py": "3bfc4f36f8c9837aae26f9016ffc8f1460dbe79f8e4579a00f7700994cd74c80",
+    "tests/test_terminal_branding.py": "3db8eddc8a3efaa82e798ef934d263b6ebb0642d806ff82798beb6a161d355f1",
+    "tests/test_terminal_branding_operator.py": "09553dde45a9845c777a3708835574831579ae52e73cc320d5418d70a0fda794",
+    "scripts/Invoke-Triglav.ps1": "ea6fac70fccded8b42bc8fe6bb92a070bb553c72b326cde601ea1e275e375f6f",
+    "docs/TERMINAL_BRANDING.md": "9308954d8590e236d464e1d753ef22a3a4bd3f347bbc332e61da078a823fc222"
   },
   "reviewed_source_sha256": {
     ".gitattributes": "fb4200024868fe58f7855899862c03c4d92eb6b17212a507b3290db039fe9946",
@@ -3547,8 +3584,8 @@
   "pin_updates": {
     ".github/workflows/offline-ci.yml": {
       "previous": "8d5178ce959a2f4a314c6ede8690418c1872de916ded08ae35ffd85bb03be3cb",
-      "current": "66753971daa8d4a10a14f0999608502cc4ab34bef93ee445d2b12772fda277a4",
-      "reason": "B3 CI integration"
+      "current": "b6e157b43ebac0061c0a9e2c828460509c7836aba2c6f8a80b67dfbe668b5412",
+      "reason": "Terminal branding implementation, operator integration and focused offline coverage"
     },
     "scripts/ci_offline.py": {
       "previous": "833d5d1115471f0fc0da7ad1e55b1322f556f13b80de039eb378a7eac3397342",
@@ -3579,6 +3616,36 @@
       "previous": null,
       "current": "7bc05a14395da6d7af58cedf3fe8a9767ad0f9b5a42fb78c5aa87b740df09def",
       "reason": "new unit test suite for criteria trust semantics"
+    },
+    "branding.py": {
+      "previous": null,
+      "current": "7d6a075f839ca92ad9a6373abea370247da6b267bc46b4e36e069ee9dc3bd00b",
+      "reason": "Terminal branding implementation, operator integration and focused offline coverage"
+    },
+    "triglav_art.py": {
+      "previous": null,
+      "current": "3bfc4f36f8c9837aae26f9016ffc8f1460dbe79f8e4579a00f7700994cd74c80",
+      "reason": "Terminal branding implementation, operator integration and focused offline coverage"
+    },
+    "tests/test_terminal_branding.py": {
+      "previous": null,
+      "current": "3db8eddc8a3efaa82e798ef934d263b6ebb0642d806ff82798beb6a161d355f1",
+      "reason": "Terminal branding implementation, operator integration and focused offline coverage"
+    },
+    "tests/test_terminal_branding_operator.py": {
+      "previous": null,
+      "current": "09553dde45a9845c777a3708835574831579ae52e73cc320d5418d70a0fda794",
+      "reason": "Terminal branding implementation, operator integration and focused offline coverage"
+    },
+    "scripts/Invoke-Triglav.ps1": {
+      "previous": null,
+      "current": "ea6fac70fccded8b42bc8fe6bb92a070bb553c72b326cde601ea1e275e375f6f",
+      "reason": "Terminal branding implementation, operator integration and focused offline coverage"
+    },
+    "docs/TERMINAL_BRANDING.md": {
+      "previous": null,
+      "current": "9308954d8590e236d464e1d753ef22a3a4bd3f347bbc332e61da078a823fc222",
+      "reason": "Terminal branding implementation, operator integration and focused offline coverage"
     }
   },
   "reviewed_baseline_head": "98dc9fa64bb76a6fae2f730407d3378fe1a0c124",
