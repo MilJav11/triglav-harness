@@ -27,11 +27,17 @@ AMAP-ML/LongHorizon-Harness: bounded work, deterministic verification, recorded
 evidence and recovery/checkpoint gates. Models propose changes; the Python
 controller decides whether the evidence permits acceptance.
 
+Start here, then use [current release status](docs/TRIGLAV_START_HERE.md) for the
+dated baseline and [operator runbook](docs/OPERATOR_RUNBOOK.md) for PowerShell.
+The release checkout is `triglav-release`; its `main` baseline is `c6a90fd`
+(20 October 2026). See [current GitHub CI status](docs/TRIGLAV_START_HERE.md#current-github-ci-status).
+
 ## Architecture
 
 The simplest path uses the included SafeQwen worker for one operator-scoped task.
 It can swap compatible local models through configuration. The full multi-unit path
-adds dependency scheduling, an advisory critic, an independent reviewer, fresh final verification, and durable terminal acceptance:
+adds dependency scheduling, an advisory critic, an independent reviewer and
+fresh final verification. Terminal acceptance is a separate opt-in gate:
 
 ```mermaid
 flowchart LR
@@ -39,10 +45,10 @@ flowchart LR
     V --> D["Dependency authorization & revalidation"]
     D --> C["Nemotron critic (advisory)"]
     C --> R["Independent GPT-OSS reviewer (HotPin)"]
-    R --> F["Fresh final verifier (15/15 tests)"]
+    R --> F["Fresh final verifier"]
     F --> S["Supervisor & Gateway cleanup check"]
     S --> K["Validated trusted checkpoint"]
-    K --> T["Durable terminal acceptance seal"]
+    K --> T["Terminal seal when explicitly enabled"]
 ```
 
 Code-only execution ends at an intermediate `READY / MILESTONE_READY` result;
@@ -50,11 +56,16 @@ it does **not** create a trusted checkpoint. Model approval cannot override a
 failed test, scope, ownership or checkpoint gate. The harness supports opt-in
 multi-WorkUnit execution with transaction-bound terminal acceptance; see
 [architecture](ARCHITECTURE.md) and [SafeQwen authority](docs/SAFEQWEN.md).
+A checkpoint does not by itself establish terminal acceptance. The ordinary
+PowerShell/CLI three-model route can create a checkpoint without a terminal seal.
+SafeQwen edits **existing files only** through hash-checked anchor replacement;
+it cannot create files, delete files or run model-selected shell commands.
 
 ## Quick Start
 
-Use native Windows, **x64 Python 3.11+**, Git and PowerShell. Python 3.11 is the
-Windows CI baseline. The controller and guarded tests use the standard library;
+Use native Windows, **x64 Python 3.11+**, Git and PowerShell. Guarded CI uses
+Python 3.11; supplemental qualification uses Python 3.12. The controller and
+guarded tests use the standard library;
 no pip install, models, Gateway, OpenCode or Cline are required for offline checks.
 
 ```powershell
@@ -66,6 +77,9 @@ python -B scripts/ci_offline.py
 Expected: exit **0**, `PASS: 390 reviewed offline cases; CLI help; ...; model calls 0`.
 The runner uses scripted responses, trusted disposable Git fixtures and real
 Windows supervision; this is not a live-model test.
+This command runs the **390 guarded cases**. Full hosted qualification requires
+**1,296 mandatory IDs** plus a separate branding/operator test step; see
+[CI scope](docs/CI.md). Earlier passing results do not confirm current-commit CI.
 
 ### Local Qwen calculator demo
 
@@ -106,22 +120,27 @@ all GPT-OSS shards and an operator-approved expert asset/digest. Review requires
 inference**, including cached-role reuse. These are not total RAM/VRAM or loading
 memory guarantees. Optional HotPin work does not block the code-only demo.
 
+### PowerShell operator
+
+The canonical wrapper is the tracked [scripts/Invoke-Triglav.ps1](scripts/Invoke-Triglav.ps1).
+The [operator runbook](docs/OPERATOR_RUNBOOK.md) gives DryRun and live commands,
+exit codes and evidence locations. The installed standalone copy differs;
+the wrapper currently contains installation-specific runtime/session paths.
+For a different installation, use the [portable setup](docs/WINDOWS_SETUP.md).
+
 ## Verification
 
-Triglav enforces deterministic verification and multi-stage review across guarded offline CI and live executions:
+Historical Live 002 independently confirmed the real Qwen -> Nemotron ->
+GPT-OSS pipeline across two dependent units, 15/15 final frozen tests and a WAL
+terminal seal. This is bounded fixture evidence, not production qualification.
+See the [qualification ledger](docs/triglav/QUALIFICATION.md) and
+[validation history](VALIDATION.md), including reporting caveats.
 
-### Live Milestones
-- **Live Run 002 (15 October 2026):** **LIVE_002_INDEPENDENTLY_CONFIRMED**. Real local execution of two genuinely dependent WorkUnits (`multiply` -> `scale`) with real Qwen3-Coder (executor), Nemotron (advisory critic, `CRITIC_CLEAN`), and GPT-OSS 120B (senior reviewer, `APPROVE`). All **15/15 final frozen tests passed** (4 addition regression, 6 multiplication, 5 scale). Committed **213 validated WAL records** in `events.jsonl`, validated trusted checkpoint `checkpoints/0000.json`, and committed terminal acceptance seal `term-20261015T095036Z-a778f62c8873.json`. Independently confirmed by Codex review.
-- **Live Run 001 (14 October 2026):** Single coding WorkUnit (`multiply`), 10/10 frozen tests passed, real three-model execution, 136 validated WAL records, terminal acceptance seal `term-20261014T091225Z-a23b9b7ed41c.json`.
-- **Public Run 003 (10 October 2026):** Initial bounded single-unit baseline execution with 10/10 tests and trusted checkpoint, preceding Live Run 001 and Live Run 002.
-
-See the [qualification summary](docs/triglav/QUALIFICATION.md) for full records.
-
-### Offline CI Scope
-The current guarded offline CI scope is **390 reviewed cases** (`scripts/ci_offline.py`), exercising CI security guards, SafeQwen worker protocols, Supervisor lifecycle and Job Objects, durable WAL transactions and terminal seals, M0-B controller authority and publication guards, M0-C terminal lifecycle acceptance, and multi-unit dependency suites with zero live model calls. See [CI scope](docs/CI.md).
-
-### Known Reporting Discrepancy
-In legacy `final-report.json` projections, criteria are displayed as `NOT_PROVEN` with `completion: null` (only AC1 in Live Run 001; AC1..AC3 in Live Run 002) because the report derives from legacy `check_completion()` serialization. The immutable append-only Store WAL (`events.jsonl`) and cryptographic terminal seal (`acceptance/term-*.json`) establish authoritative acceptance (`status: COMPLETED`, `terminal_accepted: true`). Original evidence and report files remain unmodified.
+Merged PR #9 adds checkpoint-backed criteria reporting; historical
+`final-report.json` discrepancies and original evidence remain unchanged.
+Merged PR #10 adds the [terminal splash](docs/TERMINAL_BRANDING.md): the maintainer
+visually inspected portrait, color and alignment in Windows Terminal (**PASS**).
+Other terminals have no visual qualification claim.
 
 ## Safety
 
@@ -129,19 +148,22 @@ Use trusted repositories and frozen tests: verification executes candidate code.
 Scope and process-ownership checks via Windows Job Objects are **not an OS sandbox**. Use a dedicated
 loopback Gateway and keep model assets, credentials, local configurations, PID
 files, logs and raw evidence outside publication. Runtime commands and model
-paths are operator-configurable; templates use fictional paths.
+paths in portable templates are configurable; the PowerShell wrapper embeds
+installation-specific paths and an approved expert digest.
 
-Unverified: sustained multi-step long-horizon execution (>2 units), live error recovery/replanning, live recovery/resume during active inference, and live TTL reload. Read [setup](docs/WINDOWS_SETUP.md), [runbook](RUNBOOK.md), [recovery](CONVERGENCE.md) and [limitations](docs/triglav/SAFETY_AND_LIMITATIONS.md).
+Unverified: sustained multi-step long-horizon execution (>2 units), live error
+recovery/replanning, live recovery/resume during active inference, and live TTL
+reload. Read [setup](docs/WINDOWS_SETUP.md), [operator guidance](docs/OPERATOR_RUNBOOK.md)
+and [limitations](docs/triglav/SAFETY_AND_LIMITATIONS.md). The older
+[runbook](RUNBOOK.md) and [recovery notes](CONVERGENCE.md) retain legacy-route context.
 
-## Roadmap & Phase 3
+## Roadmap
 
-Following the confirmed M0 milestone (`LIVE_002_INDEPENDENTLY_CONFIRMED`), the project has established its public preview baseline before Phase 3:
-
-1. **Phase 3.1 — Controlled Bounded Recovery:** Replanning, diagnostic error capture, and bounded retry after a failed WorkUnit without human intervention.
-2. **Phase 3.2 — Safe Interruption & Resume:** Pausing active campaigns (SIGINT) and resuming cleanly from trusted checkpoints during live model operation.
-3. **Documentation Backlog:** Comparative architectural analyses with AMAP-ML/LongHorizon-Harness and Utopia remain preserved in the documentation backlog.
-
-**Note:** Phase 3 capabilities are **not yet qualified** by Live 002. See [detailed roadmap](docs/triglav/ROADMAP.md).
+Phase 3.1 bounded repair machinery is merged (PR #8): controller-owned evidence,
+single-use grants and at most two logical attempts. It has earlier offline
+qualification, not demonstrated live repair. Operator hardening/reporting (PR #9)
+and branding (PR #10) are also merged. Safe inter-unit interruption/resume and
+longer campaigns remain qualification work; see the [roadmap](docs/triglav/ROADMAP.md).
 
 Eligible original software/documentation use the [MIT License](LICENSE),
 copyright 2026 MilJav11; see [licensing](LICENSING.md). The independent logo has

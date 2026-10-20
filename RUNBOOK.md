@@ -1,10 +1,17 @@
 # TRIGLAV public Windows runbook
 
+> **Legacy/custom route reference.** This guide retains earlier custom/OpenCode
+> configuration and startup scripts. Start with [README](README.md), the
+> [current operator guide](docs/OPERATOR_RUNBOOK.md) and
+> [portable SafeQwen setup](docs/WINDOWS_SETUP.md) for the release workflow.
+> Paths and qualification statements below belong to their named route/period;
+> the legacy startup binary location is not the current wrapper's runtime path.
+
 Use native Windows, Python 3.11+, Git and PowerShell. Run commands from the
 repository root. This is configuration guidance, not proof that the public
 snapshot reproduces a qualified host. [Phase 8B Stage 2](docs/triglav/QUALIFICATION.md#phase-8b-stage-2)
 passed on a privately provisioned deployment; clone readiness remains PARTIAL.
-For model-free help and the 129-case guarded check, use the
+For model-free help and the current 390-case guarded subset, use the
 [source-only Quick Start](README.md#quick-start). See the
 [documentation index](docs/triglav/README.md) for storage and missing assets.
 

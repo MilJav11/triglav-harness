@@ -1,6 +1,10 @@
 # Terminal identity
 
-`scripts/Invoke-Triglav.ps1` displays the original 40 x 62 portrait once, on the
+The canonical tracked [scripts/Invoke-Triglav.ps1](../scripts/Invoke-Triglav.ps1)
+includes the splash merged in PR #10. The installed standalone operator copy
+differs and does not include this integration; see the [operator guide](OPERATOR_RUNBOOK.md).
+
+The tracked script displays the original 40 x 62 portrait once, on the
 inherited interactive stderr terminal, after writing the runtime configuration
 and before starting the controller. The gateway alone redirects its stdout and
 stderr to files. Branding never enters that process or controller evidence.
@@ -64,6 +68,14 @@ manifest's `outside_scope` group because they are outside the fixed Phase 3.1
 qualification groups, not because they are skipped. Sources, operator script and
 workflow are SHA-256 pinned without expanding or weakening existing gates.
 
-GUI visual verification is still required in Windows Terminal and VS Code:
-inspect the three heads, golden detail, alignment, colors and wrapping with the
-preview commands above. Automated capability/ANSI tests do not prove GUI rendering.
+## Visual qualification
+
+As reported by the maintainer on 20 October 2026, visual inspection in
+**Windows Terminal: PASS** for portrait, color and alignment. This is a maintainer
+visual observation, not a new automated test run or live-model qualification.
+VS Code and other terminals have no visual qualification claim; advertised
+capability detection and automated ANSI tests do not establish cross-terminal
+rendering. Use the preview above for further separately scoped inspection.
+
+See [current GitHub CI status](TRIGLAV_START_HERE.md#current-github-ci-status)
+and [CI scope](CI.md).
