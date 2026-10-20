@@ -23,6 +23,10 @@ class OperatorBrandingTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix="triglav-branding-")
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
+        self.assets = self.root / "inert runtime assets"
+        self.assets.mkdir()
+        for name in ("server.bin", "model.bin", "gateway.bin", "experts.txt"):
+            (self.assets / name).write_bytes(b"offline branding fixture only\n")
         self.repo = self.root / "target repo"
         self.repo.mkdir()
         for name in ("calc.py", "test_calc.py"):
@@ -67,6 +71,22 @@ function global:Invoke-WebRequest {
 function global:python {
     # Native invocation flattens argument arrays; reproduce that at this function seam.
     $nativeArgs = @(foreach ($arg in $args) { foreach ($part in $arg) { $part } })
+    # Supply real, inert files to the unchanged configuration validation gates.
+    # A hosted runner must never depend on the operator's installed model assets.
+    $configIndex = [Array]::IndexOf($nativeArgs, '--config')
+    $configFile = $nativeArgs[$configIndex + 1]
+    $fixtureConfig = Get-Content $configFile -Raw | ConvertFrom-Json -AsHashtable
+    foreach ($resources in $fixtureConfig.safe_qwen_runtime.Values) {
+        $resources.binary = Join-Path $env:TRIGLAV_BRANDING_ASSETS 'server.bin'
+        $resources.model = Join-Path $env:TRIGLAV_BRANDING_ASSETS 'model.bin'
+    }
+    $fixtureConfig.safe_qwen_gateway.binary = Join-Path $env:TRIGLAV_BRANDING_ASSETS 'gateway.bin'
+    if ($fixtureConfig.ContainsKey('safe_qwen_reviewer_policy')) {
+        $fixtureConfig.safe_qwen_reviewer_policy.hot_experts = Join-Path $env:TRIGLAV_BRANDING_ASSETS 'experts.txt'
+        $fixtureConfig.safe_qwen_reviewer_policy.hot_experts_sha256 = $env:TRIGLAV_BRANDING_EXPERT_SHA
+    }
+    [System.IO.File]::WriteAllText($configFile, ($fixtureConfig | ConvertTo-Json -Depth 8),
+                                   [System.Text.UTF8Encoding]::new($false))
     if (@($nativeArgs | Where-Object { "$_" -like '*branding.py' }).Count) {
         $global:brandingState.splash++
         if ($env:TRIGLAV_BRANDING_FAIL -eq '1') { throw 'Cosmetic preview failure' }
@@ -86,6 +106,8 @@ $global:brandingState | ConvertTo-Json -Depth 6 | Set-Content (Join-Path $PSScri
 exit $result
 ''', encoding="utf-8")
         env = dict(os.environ, TRIGLAV_BRANDING_SESSION=str(self.root / "session"),
+                   TRIGLAV_BRANDING_ASSETS=str(self.assets),
+                   TRIGLAV_BRANDING_EXPERT_SHA=hashlib.sha256((self.assets / "experts.txt").read_bytes()).hexdigest(),
                    TRIGLAV_BRANDING_PYTHON=sys.executable, TRIGLAV_BRANDING_FAIL=str(int(fail_splash)),
                    TRIGLAV_BRANDING_EXIT=str(controller_exit), PYTHONDONTWRITEBYTECODE="1",
                    PYTHONUTF8="1", NO_COLOR="1")
@@ -105,6 +127,15 @@ exit $result
         self.assertIn('"models_contacted": false', result.stdout)
         self.assertEqual((state["splash"], state["controller"], state["stopped"]), (1, 1, 0))
         config = json.loads((self.root / "session/safeqwen.json").read_text())
+        for resources in config["safe_qwen_runtime"].values():
+            for path in resources.values():
+                self.assertTrue(Path(path).is_relative_to(self.root))
+                self.assertTrue(Path(path).is_file())
+        self.assertTrue(Path(config["safe_qwen_gateway"]["binary"]).is_relative_to(self.assets))
+        if three:
+            policy = config["safe_qwen_reviewer_policy"]
+            self.assertEqual(Path(policy["hot_experts"]), self.assets / "experts.txt")
+            self.assertEqual((policy["min_available_ram_gb"], policy["max_working_set_gb"]), (44, 32))
         mode, names = branding.runtime_info(config, critic=three, reviewer=three)
         self.assertEqual(mode, "THREE-MODEL" if three else "SINGLE-MODEL")
         self.assertEqual(names["critic"] == "OFF", not three)

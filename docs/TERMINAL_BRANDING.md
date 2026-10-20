@@ -54,9 +54,10 @@ The tests verify every original pixel, palette color, half-block RGB pair, row
 reset, alignment, viewport bounds, capabilities, encoding fallback, role flags,
 Git identity, single invocation, suppression and output isolation. PowerShell
 tests use disposable committed repositories and redirect the fixed session
-directory into their fixture. DryRun uses the real controller; gateway/process
-and RAM probes are fakes. Simulated controller success, failure and splash failure
-exercise the existing cleanup. No live inference is performed.
+directory into their fixture. DryRun uses the real controller with inert runtime
+files and a matching expert-file digest; resource validation remains active.
+Gateway/process and RAM probes are fakes. Simulated controller success, failure
+and splash failure exercise the existing cleanup. No live inference is performed.
 
 The focused tests run as a separate CI step. Their IDs are listed in the existing
 manifest's `outside_scope` group because they are outside the fixed Phase 3.1

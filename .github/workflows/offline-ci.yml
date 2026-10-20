@@ -49,10 +49,10 @@ jobs:
         with:
           python-version: "3.11"
           architecture: x64
-      - name: Parse source and run guarded offline checks
-        run: python -B scripts/ci_offline.py
       - name: Test terminal branding and PowerShell operator (no models)
         run: python -B -m unittest discover -s tests -p "test_terminal_branding*.py" -v
+      - name: Parse source and run guarded offline checks
+        run: python -B scripts/ci_offline.py
       - name: Upload guarded evidence
         if: ${{ always() && (github.event_name != 'workflow_dispatch' || inputs.full_qualification) }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

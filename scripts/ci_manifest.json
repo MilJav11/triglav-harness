@@ -3232,7 +3232,7 @@
   ],
   "source_sha256": {
     ".gitattributes": "fb4200024868fe58f7855899862c03c4d92eb6b17212a507b3290db039fe9946",
-    ".github/workflows/offline-ci.yml": "b6e157b43ebac0061c0a9e2c828460509c7836aba2c6f8a80b67dfbe668b5412",
+    ".github/workflows/offline-ci.yml": "019043f8e5612cf7687a247d43d21ebaefa358408e59227e6f5536e98ed03d3f",
     ".gitignore": "265f010050ab701724ed2c91b78ccc3f9b7291644d6dd7c65c82f302bc753e0f",
     "AGENTS.md": "4b14e8bafcc91c854a00b09ba754834ec49b77fb27db85126955991554d82576",
     "ARCHITECTURE.md": "f2f7f140787642917869207dca872dfb1c4812d7b17a89739f7eaf50a525baf6",
@@ -3405,9 +3405,9 @@
     "branding.py": "7d6a075f839ca92ad9a6373abea370247da6b267bc46b4e36e069ee9dc3bd00b",
     "triglav_art.py": "3bfc4f36f8c9837aae26f9016ffc8f1460dbe79f8e4579a00f7700994cd74c80",
     "tests/test_terminal_branding.py": "3db8eddc8a3efaa82e798ef934d263b6ebb0642d806ff82798beb6a161d355f1",
-    "tests/test_terminal_branding_operator.py": "09553dde45a9845c777a3708835574831579ae52e73cc320d5418d70a0fda794",
+    "tests/test_terminal_branding_operator.py": "671e822c9fad952e284f0f9f4c1c92845c4be941929d97edcc3d280c3587474b",
     "scripts/Invoke-Triglav.ps1": "ea6fac70fccded8b42bc8fe6bb92a070bb553c72b326cde601ea1e275e375f6f",
-    "docs/TERMINAL_BRANDING.md": "9308954d8590e236d464e1d753ef22a3a4bd3f347bbc332e61da078a823fc222"
+    "docs/TERMINAL_BRANDING.md": "75f06b4c5d8461fe6db315f15fd95b06362761bafc9208d098a42c00dec48b42"
   },
   "reviewed_source_sha256": {
     ".gitattributes": "fb4200024868fe58f7855899862c03c4d92eb6b17212a507b3290db039fe9946",
@@ -3584,7 +3584,7 @@
   "pin_updates": {
     ".github/workflows/offline-ci.yml": {
       "previous": "8d5178ce959a2f4a314c6ede8690418c1872de916ded08ae35ffd85bb03be3cb",
-      "current": "b6e157b43ebac0061c0a9e2c828460509c7836aba2c6f8a80b67dfbe668b5412",
+      "current": "019043f8e5612cf7687a247d43d21ebaefa358408e59227e6f5536e98ed03d3f",
       "reason": "Terminal branding implementation, operator integration and focused offline coverage"
     },
     "scripts/ci_offline.py": {
@@ -3634,7 +3634,7 @@
     },
     "tests/test_terminal_branding_operator.py": {
       "previous": null,
-      "current": "09553dde45a9845c777a3708835574831579ae52e73cc320d5418d70a0fda794",
+      "current": "671e822c9fad952e284f0f9f4c1c92845c4be941929d97edcc3d280c3587474b",
       "reason": "Terminal branding implementation, operator integration and focused offline coverage"
     },
     "scripts/Invoke-Triglav.ps1": {
@@ -3644,7 +3644,7 @@
     },
     "docs/TERMINAL_BRANDING.md": {
       "previous": null,
-      "current": "9308954d8590e236d464e1d753ef22a3a4bd3f347bbc332e61da078a823fc222",
+      "current": "75f06b4c5d8461fe6db315f15fd95b06362761bafc9208d098a42c00dec48b42",
       "reason": "Terminal branding implementation, operator integration and focused offline coverage"
     }
   },
