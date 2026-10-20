@@ -400,23 +400,52 @@ def parse_criteria(specs, checks):
     return criteria
 
 
-def evaluate_completion(store, current):
+def evaluate_completion(store, current=None):
     """Map every criterion to durable verifier evidence. Model text is never consulted."""
     state = store.state
     manager = state["manager"]
-    trusted = state["last_verified_checkpoint"]
+    trusted = state.get("last_verified_checkpoint")
+    if current is None:
+        if hasattr(store, "repo") and store.repo:
+            current = snapshot(store.repo)
+        elif trusted and isinstance(trusted, dict) and "snapshot" in trusted:
+            current = trusted["snapshot"]
+        else:
+            current = None
     value = {"version": VERSION, "time": now(), "checkpoint": trusted["reference"] if trusted else None,
-             "current_matches_checkpoint": bool(trusted) and current == trusted["snapshot"], "criteria": []}
+             "current_matches_checkpoint": bool(trusted) and current == trusted.get("snapshot"), "criteria": []}
     passed = {}
-    if trusted:
-        checkpoint = store.read_evidence(trusted["reference"])
-        reference = checkpoint["verification"][-1]
-        evidence = store.read_evidence(reference)
-        if evidence["passed"] and evidence["snapshot"] == checkpoint["snapshot"]:
-            for check in manager["checks"]:
-                if any(r["argv"] == check["argv"] and r["exit_code"] == 0 for r in evidence["commands"]):
-                    passed[check["id"]] = reference
-    for criterion in manager["criteria"]:
+    if trusted and isinstance(trusted, dict) and trusted.get("reference"):
+        try:
+            checkpoint = store.read_evidence(trusted["reference"])
+            if current is None:
+                current = checkpoint.get("snapshot")
+                value["current_matches_checkpoint"] = bool(current)
+            else:
+                value["current_matches_checkpoint"] = (current == checkpoint.get("snapshot"))
+            references = checkpoint.get("verification", [])
+            if references and isinstance(references, list):
+                reference = references[-1]
+                evidence = store.read_evidence(reference)
+                snap_matches = (
+                    evidence.get("snapshot") == checkpoint.get("snapshot")
+                    or (
+                        evidence.get("candidate_snapshot_digest") is not None
+                        and evidence.get("candidate_snapshot_digest") == digest(checkpoint.get("snapshot"))
+                    )
+                )
+                if evidence.get("passed") and snap_matches:
+                    executed = evidence.get("commands") or evidence.get("verifiers") or []
+                    for check in manager.get("checks", []):
+                        for r in executed:
+                            argv_match = r.get("argv") == check.get("argv")
+                            id_match = bool(r.get("verifier_id")) and r.get("verifier_id") == check.get("id")
+                            if (argv_match or id_match) and r.get("exit_code") == 0 and r.get("passed", True):
+                                passed[check["id"]] = reference
+                                break
+        except Exception:
+            pass
+    for criterion in manager.get("criteria", []):
         missing = [c for c in criterion["checks"] if c not in passed]
         proven = not missing and value["current_matches_checkpoint"]
         refs = []
@@ -426,16 +455,28 @@ def evaluate_completion(store, current):
         value["criteria"].append({"id": criterion["id"], "text": criterion["text"], "checks": criterion["checks"],
                                   "status": "PASS" if proven else "NOT_PROVEN", "missing_checks": missing,
                                   "evidence": refs + ([trusted["reference"]] if proven else [])})
-    value["all_proven"] = all(c["status"] == "PASS" for c in value["criteria"])
+    value["all_proven"] = bool(value["criteria"]) and all(c["status"] == "PASS" for c in value["criteria"])
     return value
 
 
 # ----------------------------------------------------------------------------- fresh bounded context
 
-def criteria_status(manager):
-    proven = set(manager["proven_checks"])
-    return [{"id": c["id"], "text": c["text"], "checks": c["checks"],
-             "status": "PASS" if set(c["checks"]) <= proven else "NOT_PROVEN"} for c in manager["criteria"]]
+def criteria_status(manager, store=None):
+    """Determine criteria status strictly from verified checks; stop label is NEVER proof."""
+    if store is not None and store.state.get("last_verified_checkpoint"):
+        try:
+            eval_result = evaluate_completion(store)
+            if eval_result and "criteria" in eval_result:
+                return eval_result["criteria"]
+        except Exception:
+            pass
+    proven = set(manager.get("proven_checks", []))
+    res = []
+    for c in manager.get("criteria", []):
+        missing = [chk for chk in c["checks"] if chk not in proven]
+        res.append({"id": c["id"], "text": c["text"], "checks": c["checks"],
+                    "status": "PASS" if not missing else "NOT_PROVEN", "missing_checks": missing})
+    return res
 
 
 def build_context(store, *, role, step=None, files=None):
@@ -1572,6 +1613,20 @@ class ManagerLoop:
         manager["stop"] = {"status": status, "reason": reason, "message": message or reason, "time": now(),
                            "round": self.store.state["round_number"], "cleanup": cleanup,
                            "resumable": status in RESUMABLE_TERMINAL}
+        if status == "COMPLETED" and self.store.state.get("last_verified_checkpoint"):
+            comp_eval = evaluate_completion(self.store)
+            if comp_eval.get("all_proven"):
+                manager["completion"] = {
+                    "reference": None,
+                    "all_proven": True,
+                    "summary": [[c["id"], c["status"]] for c in comp_eval["criteria"]],
+                    "checkpoint": comp_eval["checkpoint"],
+                }
+                verified_passed = {chk for c in comp_eval["criteria"] if c["status"] == "PASS" for chk in c["checks"]}
+                manager["proven_checks"] = sorted(
+                    set(manager.get("proven_checks", [])) | verified_passed,
+                    key=lambda x: int(x.split("-")[1]) if "-" in x and x.split("-")[1].isdigit() else str(x)
+                )
         self.mcommit(manager, status, current_step="finished" if status == "COMPLETED" else f"stopped:{reason}")
         self.note(f"stopped {status}: {reason}")
         return write_report(self.store)
@@ -2247,14 +2302,25 @@ def write_report(store):
         except Exception:
             pass
     manager = state["manager"]
-    completion = manager["completion"]
+    completion = manager.get("completion")
+    eval_criteria = None
+    if store.state.get("last_verified_checkpoint"):
+        try:
+            eval_res = evaluate_completion(store)
+            if eval_res and "criteria" in eval_res:
+                eval_criteria = eval_res["criteria"]
+                if not completion and eval_res.get("all_proven"):
+                    completion = eval_res
+        except Exception:
+            pass
+    report_criteria = eval_criteria if eval_criteria is not None else criteria_status(manager, store)
     report = {"run_id": state["run_id"], "status": state["status"], "stop": manager["stop"],
               "rounds": [{k: r[k] for k in ("round", "step_id", "kind", "risk", "implementation", "verification",
                                             "critic", "reviewer", "trusted", "outcome", "reason")}
                          for r in manager["rounds"]],
               "round_number": state["round_number"], "runtime_seconds": manager["runtime_seconds"],
               "counters": manager["counters"], "budgets": manager["budgets"],
-              "criteria": criteria_status(manager), "completion": completion,
+              "criteria": report_criteria, "completion": completion,
               "last_verified_checkpoint": (state["last_verified_checkpoint"] or {}).get("reference"),
               "verified_progress": state["verified_progress"],
               "remaining_work": state["remaining_work"], "human_action": (manager["stop"] or {}).get("message")
