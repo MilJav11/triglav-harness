@@ -38,6 +38,9 @@
 .PARAMETER DryRun
     Validate inputs, file scope, budgets and policy without starting gateways or calling models.
 
+.PARAMETER Quiet
+    Suppress the terminal splash and controller live progress; retain evidence output.
+
 .PARAMETER TriglavRoot
     Path to the TRIGLAV release working tree (default: auto-detected or 'C:\AI\worktrees\triglav-release').
 
@@ -76,6 +79,7 @@ param(
 
     [switch]$ThreeModel,
     [switch]$DryRun,
+    [switch]$Quiet,
 
     [string]$TriglavRoot = ""
 )
@@ -109,7 +113,6 @@ if (-not (Test-Path (Join-Path $repoPath ".git"))) {
 }
 
 # 1. Require clean committed starting repository
-Write-Host "=== TRIGLAV OPERATOR CONTROLLER ===" -ForegroundColor Cyan
 Write-Host "Target Repository: $repoPath"
 Write-Host "Task: $Task"
 Write-Host "Mode: $(if ($ThreeModel) { 'Three-Model Chain (Qwen + Nemotron + GPT-OSS)' } else { 'Single-Model (Qwen)' })"
@@ -353,6 +356,22 @@ if ($ThreeModel) {
 }
 Set-Utf8NoBom $configPath ($cfgObj | ConvertTo-Json -Depth 6)
 
+# Render once on the inherited terminal, outside gateway logs and controller evidence.
+# The preview reads the exact generated config; it never imports the controller.
+if (-not $Quiet) {
+    $splashExit = $LASTEXITCODE
+    try {
+        $splashArgs = @("-B", "-X", "utf8", (Join-Path $triglavPath "branding.py"),
+                        "--repo", $repoPath, "--config", $configPath)
+        if ($ThreeModel) { $splashArgs += @("--critic", "--reviewer") }
+        if ($DryRun) { $splashArgs += "--dry-run" }
+        & python $splashArgs
+    } catch { # Cosmetic failure must never interrupt an engineering run.
+    } finally {
+        $global:LASTEXITCODE = $splashExit
+    }
+}
+
 # Build CLI argument list
 $allowArgs = @()
 foreach ($a in $AllowPaths) { $allowArgs += @("--allow", $a) }
@@ -379,6 +398,7 @@ $cliArgs += @(
 )
 $cliArgs += $allowArgs
 $cliArgs += $forbidArgs
+if ($Quiet) { $cliArgs += "--quiet" }
 
 if ($ThreeModel) {
     $cliArgs += @("--reviewer", "--review-policy", "three-model")
