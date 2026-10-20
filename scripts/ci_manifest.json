@@ -1364,6 +1364,15 @@
       "test_convergence.RoundConvergenceTests.test_same_goal_new_evidence_accepted_but_same_state_cosmetic_replay_refused",
       "test_convergence.RoundConvergenceTests.test_same_goal_new_workspace_cannot_evade_retry_lineage",
       "test_convergence.RoundConvergenceTests.test_same_goal_with_new_failure_evidence_on_same_workspace_can_recover",
+      "test_criteria_reporting.TrustSemanticsCriteriaTests.test_all_criteria_proven_with_missing_proof_remains_not_proven",
+      "test_criteria_reporting.TrustSemanticsCriteriaTests.test_conclude_does_not_manufacture_pass_without_evidence",
+      "test_criteria_reporting.TrustSemanticsCriteriaTests.test_failed_final_verification_remains_not_proven",
+      "test_criteria_reporting.TrustSemanticsCriteriaTests.test_historical_run_evaluates_pass_if_present",
+      "test_criteria_reporting.TrustSemanticsCriteriaTests.test_incomplete_checks_remains_not_proven",
+      "test_criteria_reporting.TrustSemanticsCriteriaTests.test_legitimate_fully_verified_completion_passes",
+      "test_criteria_reporting.TrustSemanticsCriteriaTests.test_mismatched_verifier_command_remains_not_proven",
+      "test_criteria_reporting.TrustSemanticsCriteriaTests.test_missing_final_verification_artifact_remains_not_proven",
+      "test_criteria_reporting.TrustSemanticsCriteriaTests.test_working_tree_drift_after_checkpoint_remains_not_proven",
       "test_critic.CriticTests.test_bounded_valid_result_logs_only_contract_fields",
       "test_critic.CriticTests.test_changed_verification_evidence_is_reviewed_again",
       "test_critic.CriticTests.test_cleanup_failure_blocks_senior_start",
@@ -3245,7 +3254,7 @@
     "harness.py": "b97b6964a5b4617393263799e59311ce3bc2409cf93a2a32b87e166cf9d9d3ea",
     "integration_shim.py": "5a9427e87e205c717d5b2efd5f07f587a4a07415e541683cab97714de1a25116",
     "live_work_unit_executor.py": "1de0fa01c945c81825c96232fcd9b8f4a2f0b65205835c7374311a95cd6977cc",
-    "manager.py": "4ea264710dd5d4ce7d877f35a8af4d39659ac9bef7cf6125171561a7083b2340",
+    "manager.py": "2d919fa57933a5edf299ddc69bd2c745e538ca821e1309aa3a8b393d6f446390",
     "offline_scripted_executor.py": "55a1c5e0bf6e12461d828dda4afc5bf62b6bf8cdcec29cc64d16d62e2701e85d",
     "offline_scripted_executor_worker.py": "52030a71e782db713d7cc95cd280cdb1a8981cd8acaf9c78f64e7b3a30c06fe6",
     "opencode_executor.py": "837d52f88a56fd1aaa930cb9104e0f579a380fd618e1603227624e184ba291b6",
@@ -3300,6 +3309,7 @@
     "tests/test_ci_supplemental_runner.py": "d6c0a6c895f53c84b594bdb707ef10bd19f24274f73f3f5e2d563e5bf20305f6",
     "tests/test_command_budgets.py": "548239dc1456bca0a16216a01fff36e50ba692a66c54a889861154bb267b53df",
     "tests/test_convergence.py": "887cd56cf20b6dcc0b1a7aefc81855c5d958b23fb76f621ee53e9da1008f09c1",
+    "tests/test_criteria_reporting.py": "7bc05a14395da6d7af58cedf3fe8a9767ad0f9b5a42fb78c5aa87b740df09def",
     "tests/test_critic.py": "dad50782a0a733d1d2487f58701235e488cd3deb072f0681a481cae59f4dd6d1",
     "tests/test_critic_completion.py": "243d84d46fa3a809f2fadc4365dbb219318fa3fb18657783a78f7413ec2a87f6",
     "tests/test_critic_wave5.py": "377da22ff0f89ce0b4b8d68195936711cae1a6025b5a7a618c69fc29c1d08334",
@@ -3559,6 +3569,16 @@
       "previous": "80af4f062bde12596604fd608ee93b20edb930defb52e110c23244bba72109f9",
       "current": "70f6cc507a9341669477c0083b64757d1a85e870f8fe952b82c4992a28a6a249",
       "reason": "B3 CI integration"
+    },
+    "manager.py": {
+      "previous": "4ea264710dd5d4ce7d877f35a8af4d39659ac9bef7cf6125171561a7083b2340",
+      "current": "2d919fa57933a5edf299ddc69bd2c745e538ca821e1309aa3a8b393d6f446390",
+      "reason": "criteria trust semantics hardening"
+    },
+    "tests/test_criteria_reporting.py": {
+      "previous": null,
+      "current": "7bc05a14395da6d7af58cedf3fe8a9767ad0f9b5a42fb78c5aa87b740df09def",
+      "reason": "new unit test suite for criteria trust semantics"
     }
   },
   "reviewed_baseline_head": "98dc9fa64bb76a6fae2f730407d3378fe1a0c124",
