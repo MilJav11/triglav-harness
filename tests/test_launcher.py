@@ -23,7 +23,8 @@ class LauncherTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="triglav-launcher-")
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        # Hosted Windows TEMP may use an 8.3 alias; PowerShell expands it.
+        self.root = Path(self.temp.name).resolve()
         self.release = self.root / "release space ž"
         scripts = self.release / "scripts"
         scripts.mkdir(parents=True)

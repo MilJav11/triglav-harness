@@ -3448,7 +3448,7 @@
     "docs/OPERATOR_RUNBOOK.md": "21b8ecb3bc18b01610baabd1b47f107f511a3077e5ad5bba07f481511a31eb86",
     "scripts/Start-Triglav.ps1": "de4c5e8973bb2a6cade90b9f98fb34ac6650be4f66508f763b66ad836548c4d7",
     "scripts/launcher_evidence.py": "507d7558eea53f861dfcdc361c78e0f03349017c0c50334bbdd08cad5af1de94",
-    "tests/test_launcher.py": "d854ea1d6c04b93c1cdebd3ab158996f12cc2531ad2057e041a5d14796a25be5"
+    "tests/test_launcher.py": "09bba7cabc1c4a17c4c59f9d734cd6f02d9a25b4d1fd5604fba6e1506071e7f3"
   },
   "reviewed_source_sha256": {
     ".gitattributes": "fb4200024868fe58f7855899862c03c4d92eb6b17212a507b3290db039fe9946",
