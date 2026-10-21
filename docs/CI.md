@@ -162,7 +162,7 @@ model runs. Fork-run approval follows GitHub's repository policy.
 
 | Jobs | Time limit per job |
 |---|---:|
-| Guarded plus focused branding/operator step | 35 minutes |
+| Guarded plus focused branding/operator step | 60 minutes |
 | Nine supplemental shard jobs | 120 minutes |
 | Policy and runner mandatory jobs | 45 minutes |
 | Full-summary collector | 15 minutes |

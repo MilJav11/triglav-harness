@@ -119,6 +119,14 @@ class ActiveVerificationTests(unittest.TestCase):
                     return prepared(fixture, *args, **kwargs)
                 stack.enter_context(patch.object(integration.IntegrationTests, "prepared", bounded))
             stack.enter_context(patch("manager.create_run", side_effect=fixture))
+            if self._testMethodName == "test_v2_completed_worker_is_never_upgraded":
+                # This test compares exact WAL bytes across a ~16s window on slow runners; isolate it
+                # from periodic (15s) heartbeat WAL growth. Real controller behavior is unchanged.
+                orig_init = Supervisor.__init__
+                def sup_init(sup_self, *args, **kwargs):
+                    orig_init(sup_self, *args, **kwargs)
+                    sup_self._pulse_interval = 600
+                stack.enter_context(patch.object(Supervisor, "__init__", sup_init))
             first.ActiveFirstTests.setUp(self)
         if selected:
             self.assertEqual(self.cfg["timeout_seconds"], self._verification_budget)
