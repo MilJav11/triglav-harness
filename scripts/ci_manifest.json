@@ -3269,7 +3269,7 @@
   ],
   "source_sha256": {
     ".gitattributes": "fb4200024868fe58f7855899862c03c4d92eb6b17212a507b3290db039fe9946",
-    ".github/workflows/offline-ci.yml": "0c461ba4d9efe6bc223b9657b785d08c5ed7b8cb6b03f23b512e52588c06fd8f",
+    ".github/workflows/offline-ci.yml": "b38288f7da2e07320d1a95010229a6ffd05c97bcd2f0ff491af3d632c8ddfcfe",
     ".gitignore": "265f010050ab701724ed2c91b78ccc3f9b7291644d6dd7c65c82f302bc753e0f",
     "AGENTS.md": "34e43db355e87349dc59a56f709db898410ef70610c0d6bb40689117a6516d50",
     "ARCHITECTURE.md": "63716eaccb2e5bf943aa1ee19c9255344fea3c4d563b85e937f94c7f0148f63d",
@@ -3293,7 +3293,7 @@
     "config/safeqwen.example.json": "0e3db8d5069272034b6abefdd3837aa05252f315733cd9892fb9ee7fe2ff5e64",
     "critic.py": "541a124588352d3170cff9be7aabab6876601021c2465f4bbac73259f15ee5c3",
     "critic_executor.py": "56abb6546f54e2db4e2a579abfa1e0f2a00fb73cb71f7ca10fb7afdc03e09eba",
-    "docs/CI.md": "7d8edad0cc876646219f58e8d9f328a05cdf125c34b61e68e4ef47e9d07442da",
+    "docs/CI.md": "24e3265dffeda0e8b6d0c6063a3b489b6e1eb482f1aa1e693c278d6cc5a93ef9",
     "docs/HOTPIN_POLICY.md": "dd115d1ffdea497aa26572899d397c89ee7ed88ac6e6e7d8197acb94c608b2ca",
     "docs/SAFEQWEN.md": "bbae8f33a6acaa9aa9681ba07f0b5984a83e572590274ce283f855ddb6ac7387",
     "docs/SAFEQWEN_SOURCE.md": "475ba66530dcb33d7048bbadeaa77d980801c2f4c05ec10ada3599b05e16f86c",
