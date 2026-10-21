@@ -6,6 +6,112 @@ The separately installed tools/triglav/Invoke-Triglav.ps1 differs: it lacks the
 merged splash and -Quiet handling. Do not assume the copies are interchangeable.
 This guide describes the tracked version at the [release baseline](TRIGLAV_START_HERE.md).
 
+## Interactive launcher
+
+From the release root in Windows PowerShell 5.1 on Windows 11:
+
+```powershell
+powershell.exe -NoProfile -File .\scripts\Start-Triglav.ps1
+```
+
+The menu supports new tasks, loading a project profile, inspecting previous runs,
+managing profiles and help/diagnostics. Choose **Start new coding task**, enter
+the target Git root (spaces and Unicode are supported), and select Qwen-only
+(default) or three-model mode. Enter the task, existing editable files and
+explicit frozen files, then the deterministic verification command. Each section
+has a numbered heading. Enter one existing relative path at each **EDITABLE FILE**
+or **FORBIDDEN FILE** prompt. **Press ENTER on an empty line to finish.** Missing
+or invalid files, duplicates and scope overlap are rejected immediately; correct
+the entry in the same step without losing your project, model, task or earlier
+valid files. The pre-DryRun summary lists editable and forbidden files separately.
+Both lists need at least
+one file for this operator. SafeQwen cannot create new files. Type `back` at any
+prompt to return to the menu; file-entry errors stay in the current step.
+The flowing menu tolerates resizing without cursor positioning. The canonical
+operator retains its own adaptive splash.
+
+Review the configuration preview. Three-model mode requires typing `THREE` for
+each configuration and can need substantially more RAM, time and loading. It
+does not promise a checkpoint or terminal acceptance. Press Enter to run the
+mandatory DryRun. It delegates to the canonical operator, starts no model,
+executes no target verification and writes operator session configuration as
+described below. A failed DryRun blocks live execution. Following a passing
+DryRun, the launcher rechecks repository identity and cleanliness, shows a safety
+summary, and requires typing the exact word `RUN` for one live run. Enter cancels.
+It checks again after confirmation. Any changed configuration requires a fresh
+DryRun; profiles never bypass this sequence. There is no automatic retry,
+stash, reset, commit, push or rollback.
+
+Profiles use version-1 JSON under the current user's local application data
+directory, `TRIGLAV/Launcher/profiles/`, outside the project. Saving is optional;
+task descriptions are excluded unless explicitly selected. Keep secrets out of
+all profile fields, including commands and optional task text. Unknown fields,
+unsupported versions, invalid scope and corrupted JSON are rejected. Writes use
+an atomic same-directory rename without overwriting existing profiles. Manage
+profiles to inspect or explicitly delete one; use a new name to save changed
+preferences. The selector shows at most 30 profiles. The launcher keeps task
+invocation data in memory, although the canonical operator/controller persist
+their normal session and task evidence.
+
+After a run, inspect the operator exit and execution outcome separately from
+persisted trust artifacts. A failed execution remains **FAILED /
+HUMAN_ACTION_REQUIRED** even when a valid earlier checkpoint survives. Unexpected
+operator-exit/WAL disagreements are shown explicitly and require inspection.
+
+- **VERIFIED INTERMEDIATE CANDIDATE**: `READY` with reason `MILESTONE_READY`,
+  normally exit **2** for Qwen-only. This is not generic model failure and does
+  not guarantee a trusted checkpoint.
+- **Retained trusted checkpoint**: the persisted checkpoint and its referenced
+  evidence pass the existing controller validators. This is reported separately
+  and does not establish current execution success.
+- **Terminal acceptance evidence: VALIDATED**: only a validated WAL-bound
+  acceptance transaction and seal permit this label. The ordinary canonical operator does not enable
+  this gate. Historical terminal-enabled runs can be inspected.
+- **FAILED / HUMAN_ACTION_REQUIRED**, or **UNKNOWN** when evidence cannot be
+  validated or correlated: preserve changes and inspect the diagnostic and
+  evidence location. An exit of 0 alone never establishes trust.
+
+Current invocation evidence is selected only by the unique `Autonomous run:` ID
+printed by that operator process and matched against the target, task, scope,
+mode and verifier. The launcher never guesses from timestamps or another recent
+run. It reports recorded verification, changed paths, controller cleanup and
+trust where available. Gateway process cleanup remains **UNKNOWN** because the
+wrapper's diagnostics do not independently prove all owned processes exited.
+The bounded previous-run menu rejects linked/reparse-point run directories and
+linked runs roots. It shows the latest 20 eligible persisted run IDs; selecting
+one reads the WAL through existing validators without regenerating historical
+reports or modifying evidence bytes. Missing, malformed and stale report
+projections are identified; validated WAL state remains authoritative. This
+inspection can flush an existing terminal WAL through the controller's loader;
+it does not repair it. Incomplete WAL tails or orphan seals require manual review.
+
+To install a desktop shortcut **only after reviewing the implementation**, run:
+
+```powershell
+powershell.exe -NoProfile -File .\scripts\Start-Triglav.ps1 -InstallShortcut
+```
+
+This explicit command uses the actual Windows Desktop folder (including a
+redirected/OneDrive Desktop), opens PowerShell with `-NoExit`, quotes the resolved
+launcher path, uses the built-in PowerShell icon and refuses an existing
+`TRIGLAV.lnk`. It requires no administrator access, global PATH change,
+execution-policy bypass, service or autostart entry. If local policy blocks a
+script, follow your organization's policy; the launcher does not change it.
+Moving the checkout requires recreating the shortcut explicitly.
+
+If the launcher is unavailable, use `scripts/Invoke-Triglav.ps1` directly with
+the splatted arguments in **DryRun first** below. The launcher does not make
+installation-specific paths portable, add terminal acceptance to that operator,
+or qualify live cancellation/resume. Ctrl+C during inference still requires
+manual evidence/process inspection; it is not a rollback facility.
+
+Focused offline validation (fake model runs, no shortcut installation):
+
+```powershell
+python -B -m unittest discover -s tests -p "test_launcher.py" -v
+python -B scripts/ci_supplemental.py check
+```
+
 ## Prerequisites and scope
 
 Use native x64 Windows, Python 3.11+, Git and PowerShell. Run from the release

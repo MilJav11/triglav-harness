@@ -122,6 +122,16 @@ memory guarantees. Optional HotPin work does not block the code-only demo.
 
 ### PowerShell operator
 
+For a guided menu, run `powershell.exe -NoProfile -File .\scripts\Start-Triglav.ps1`
+from the release root. Choose a clean Git project, describe the task, select
+existing editable and frozen files, and enter a deterministic verification
+command. Qwen-only is the default. Every live request requires a fresh successful
+DryRun and typing `RUN`; three-model mode also requires typing `THREE`.
+Exit **2** with `READY / MILESTONE_READY` is a verified intermediate candidate,
+not a trusted checkpoint. The menu also offers optional local profiles and
+read-only persisted-run inspection. See the [launcher guide](docs/OPERATOR_RUNBOOK.md#interactive-launcher)
+for result interpretation and explicit desktop shortcut installation.
+
 The canonical wrapper is the tracked [scripts/Invoke-Triglav.ps1](scripts/Invoke-Triglav.ps1).
 The [operator runbook](docs/OPERATOR_RUNBOOK.md) gives DryRun and live commands,
 exit codes and evidence locations. The installed standalone copy differs;
