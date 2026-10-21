@@ -49,8 +49,11 @@ jobs:
         with:
           python-version: "3.11"
           architecture: x64
-      - name: Test terminal branding and PowerShell operator (no models)
-        run: python -B -m unittest discover -s tests -p "test_terminal_branding*.py" -v
+      - name: Test terminal branding, PowerShell operator and launcher (no models)
+        run: |
+          python -B -m unittest discover -s tests -p "test_terminal_branding*.py" -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -B -m unittest discover -s tests -p "test_launcher.py" -v
       - name: Parse source and run guarded offline checks
         run: python -B scripts/ci_offline.py
       - name: Upload guarded evidence
