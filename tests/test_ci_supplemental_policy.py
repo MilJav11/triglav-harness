@@ -33,7 +33,7 @@ SAFE_QWEN_PINS = {
     "offline_scripted_executor.py": OFFLINE_SHA,
     "safe_executor_binding.py": "de5746ff7e4693a4639ef4ba5ba9d2ecb1f5dfd8b139302ef9635df94a3c8aa1",
     "work_units.py": "410b6c70f7378f40c64015d670ccf1bdf555ac3df9abd2e03570e8be10c69fb8",
-    "harness.py": "b97b6964a5b4617393263799e59311ce3bc2409cf93a2a32b87e166cf9d9d3ea",
+    "harness.py": "e83f6ae9788597e3fa4f556d2a4205c0b03c7f8deff55e6b8d0c5f365210fe23",
     "supervision.py": "063c1725727aad0e73165353e4621dccb04a8285e1efeb2f3f9ca3a98bb60ffc",
 }
 

@@ -565,6 +565,7 @@ class Gateway:
         timers = []
         cancelled_watchers = []
         finished = threading.Event()
+        interrupted = threading.Event()
         opener = urllib.request.urlopen
         if self.execution_deadline is not None or cancel is not None or maximum is not None:
             deadline = self.execution_deadline
@@ -574,6 +575,7 @@ class Gateway:
                         super().connect()
                         sock = conn.sock
                         def interrupt():
+                            interrupted.set()
                             try:
                                 sock.shutdown(socket.SHUT_RDWR)
                             except OSError:
@@ -610,6 +612,10 @@ class Gateway:
         try:
             with opener(req, timeout=timeout) as response:
                 raw = response.read() if maximum is None else response.read(maximum + 1)
+                if interrupted.is_set():
+                    # A deadline/cancel interrupt can end the read before the coarse Windows
+                    # monotonic clock reports expiry; never treat that as a completed response.
+                    raise TimeoutError("Model request interrupted by controller deadline or cancellation")
                 if maximum is not None and len(raw) > maximum:
                     raise ValueError("Model response exceeds controller byte limit")
                 if cancel is not None and cancel.is_set():
